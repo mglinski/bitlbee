@@ -805,7 +805,8 @@ static char *set_eval_by_account(set_t *set, char *value)
 	}
 
 	icc->account = acc;
-	if ((icc->type & IRC_CC_TYPE_MASK) == IRC_CC_TYPE_ACCOUNT) {
+//	if ((icc->type & IRC_CC_TYPE_MASK) == IRC_CC_TYPE_ACCOUNT) {
+	if( icc->type == IRC_CC_TYPE_ACCOUNT ) {
 		bee_irc_channel_update(ic->irc, ic, NULL);
 	}
 
