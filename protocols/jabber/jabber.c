@@ -70,7 +70,7 @@ static void jabber_init(account_t *acc)
 
 	s = set_add(&acc->set, "proxy", "<local>;<auto>", NULL, acc);
 
-	s = set_add(&acc->set, "resource", "BitlBee", NULL, acc);
+	s = set_add(&acc->set, "resource", "BitlBeeInnoExperimental", NULL, acc);
 	s->flags |= ACC_SET_OFFLINE_ONLY;
 
 	s = set_add(&acc->set, "resource_select", "activity", NULL, acc);
@@ -576,6 +576,17 @@ static void jabber_chat_invite_(struct groupchat *c, char *who, char *msg)
 	g_free(msg_alt);
 }
 
+static void jabber_chat_kick_( struct groupchat *c, char *who, const char *msg )
+{
+    if (msg[0] == ':') {
+	    msg += 1;
+    }
+
+	if( c && who )
+		jabber_chat_kick( c, who, msg );
+	
+}
+
 static void jabber_keepalive(struct im_connection *ic)
 {
 	/* Just any whitespace character is enough as a keepalive for XMPP sessions. */
@@ -703,6 +714,7 @@ void jabber_initmodule()
 	ret->chat_msg = jabber_chat_msg_;
 	ret->chat_topic = jabber_chat_topic_;
 	ret->chat_invite = jabber_chat_invite_;
+	ret->chat_kick = jabber_chat_kick_;
 	ret->chat_leave = jabber_chat_leave_;
 	ret->chat_join = jabber_chat_join_;
 	ret->chat_with = jabber_chat_with_;

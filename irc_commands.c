@@ -709,7 +709,7 @@ static const command_t irc_commands[] = {
 	{ "ison",        1, irc_cmd_ison,        IRC_CMD_LOGGED_IN },
 	{ "watch",       1, irc_cmd_watch,       IRC_CMD_LOGGED_IN },
 	{ "invite",      2, irc_cmd_invite,      IRC_CMD_LOGGED_IN },
-	{ "kick",        2, irc_cmd_kick,        IRC_CMD_LOGGED_IN },
+	{ "kick",        3, irc_cmd_kick,        IRC_CMD_LOGGED_IN },
 	{ "topic",       1, irc_cmd_topic,       IRC_CMD_LOGGED_IN },
 	{ "oper",        2, irc_cmd_oper,        IRC_CMD_LOGGED_IN },
 	{ "list",        0, irc_cmd_list,        IRC_CMD_LOGGED_IN },

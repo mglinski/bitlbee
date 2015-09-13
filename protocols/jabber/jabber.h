@@ -232,6 +232,7 @@ struct jabber_transfer {
 #define XMLNS_DISCO_ITEMS  "http://jabber.org/protocol/disco#items"              /* XEP-0030 */
 #define XMLNS_MUC          "http://jabber.org/protocol/muc"                      /* XEP-0045 */
 #define XMLNS_MUC_USER     "http://jabber.org/protocol/muc#user"                 /* XEP-0045 */
+#define XMLNS_MUC_ADMIN    "http://jabber.org/protocol/muc#admin"                /* XEP-0045 */
 #define XMLNS_CAPS         "http://jabber.org/protocol/caps"                     /* XEP-0115 */
 #define XMLNS_FEATURE      "http://jabber.org/protocol/feature-neg"              /* XEP-0020 */
 #define XMLNS_SI           "http://jabber.org/protocol/si"                       /* XEP-0095 */
@@ -347,6 +348,7 @@ void jabber_chat_free(struct groupchat *c);
 int jabber_chat_msg(struct groupchat *ic, char *message, int flags);
 int jabber_chat_topic(struct groupchat *c, char *topic);
 int jabber_chat_leave(struct groupchat *c, const char *reason);
+void jabber_chat_kick( struct groupchat *c, char *who, const char *message );
 void jabber_chat_pkt_presence(struct im_connection *ic, struct jabber_buddy *bud, struct xt_node *node);
 void jabber_chat_pkt_message(struct im_connection *ic, struct jabber_buddy *bud, struct xt_node *node);
 void jabber_chat_invite(struct groupchat *c, char *who, char *message);

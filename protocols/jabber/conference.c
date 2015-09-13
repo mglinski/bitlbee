@@ -237,6 +237,26 @@ void jabber_chat_invite(struct groupchat *c, char *who, char *message)
 	xt_free_node(node);
 }
 
+void jabber_chat_kick( struct groupchat *c, char *who, const char *message )
+{
+	struct xt_node *node = 0;
+	struct im_connection *ic = c->ic;
+	struct jabber_chat *jc = c->data;
+
+	node = xt_new_node( "item", NULL, NULL );
+	xt_add_attr( node, "affiliation", message );
+	xt_add_attr( node, "jid", who );
+
+	node = xt_new_node( "query", NULL, node );
+	xt_add_attr( node, "xmlns", XMLNS_MUC_ADMIN );
+	
+	node = jabber_make_packet( "iq", "set", jc->name, node );
+
+	jabber_write_packet( ic, node );
+
+	xt_free_node( node );
+}
+
 /* Not really the same syntax as the normal pkt_ functions, but this isn't
    called by the xmltree parser directly and this way I can add some extra
    parameters so we won't have to repeat too many things done by the caller
