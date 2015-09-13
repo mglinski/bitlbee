@@ -346,8 +346,19 @@ void irc_send_msg(irc_user_t *iu, const char *type, const char *dst, const char 
 
 void irc_send_msg_raw(irc_user_t *iu, const char *type, const char *dst, const char *msg)
 {
-	irc_write(iu->irc, ":%s!%s@%s %s %s :%s",
-	          iu->nick, iu->user, iu->host, type, dst, msg && *msg ? msg : " ");
+	char *fixhost;
+	int x;
+
+	fixhost = g_strdup(iu->host);
+	for (x = 0; x < strlen(fixhost); x++) {
+		if (fixhost[x] == ' ')
+			fixhost[x] = '_';
+	}
+
+	irc_write( iu->irc, ":%s!%s@%s %s %s :%s",
+	           iu->nick, iu->user, fixhost, type, dst, msg && *msg ? msg : " " );
+
+	g_free(fixhost);
 }
 
 void irc_send_msg_f(irc_user_t *iu, const char *type, const char *dst, const char *format, ...)
