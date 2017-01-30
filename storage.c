@@ -28,10 +28,13 @@
 #define BITLBEE_CORE
 #include "bitlbee.h"
 
-extern storage_t storage_text;
 extern storage_t storage_xml;
 
 static GList *storage_backends = NULL;
+
+const struct prpl protocol_missing = {
+	.name = "_unknown",
+};
 
 void register_storage_backend(storage_t *backend)
 {
@@ -70,7 +73,7 @@ GList *storage_init(const char *primary, char **migrate)
 	register_storage_backend(&storage_xml);
 
 	storage = storage_init_single(primary);
-	if (storage == NULL && storage->save == NULL) {
+	if (storage == NULL || storage->save == NULL) {
 		return NULL;
 	}
 
@@ -87,7 +90,7 @@ GList *storage_init(const char *primary, char **migrate)
 	return ret;
 }
 
-storage_status_t storage_check_pass(const char *nick, const char *password)
+storage_status_t storage_check_pass(irc_t *irc, const char *nick, const char *password)
 {
 	GList *gl;
 
@@ -97,7 +100,7 @@ storage_status_t storage_check_pass(const char *nick, const char *password)
 		storage_t *st = gl->data;
 		storage_status_t status;
 
-		status = st->check_pass(nick, password);
+		status = st->check_pass(irc, nick, password);
 		if (status != STORAGE_NO_SUCH_USER) {
 			return status;
 		}
@@ -171,7 +174,7 @@ storage_status_t storage_save(irc_t *irc, char *password, int overwrite)
 	return st;
 }
 
-storage_status_t storage_remove(const char *nick, const char *password)
+storage_status_t storage_remove(const char *nick)
 {
 	GList *gl;
 	storage_status_t ret = STORAGE_OK;
@@ -185,7 +188,7 @@ storage_status_t storage_remove(const char *nick, const char *password)
 		storage_t *st = gl->data;
 		storage_status_t status;
 
-		status = st->remove(nick, password);
+		status = st->remove(nick);
 		ok |= status == STORAGE_OK;
 		if (status != STORAGE_NO_SUCH_USER && status != STORAGE_OK) {
 			ret = status;

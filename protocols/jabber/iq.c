@@ -27,6 +27,7 @@
 static xt_status jabber_parse_roster(struct im_connection *ic, struct xt_node *node, struct xt_node *orig);
 static xt_status jabber_iq_display_vcard(struct im_connection *ic, struct xt_node *node, struct xt_node *orig);
 static xt_status jabber_gmail_handle_new(struct im_connection *ic, struct xt_node *node);
+static xt_status jabber_iq_carbons_response(struct im_connection *ic, struct xt_node *node, struct xt_node *orig);
 
 xt_status jabber_pkt_iq(struct xt_node *node, gpointer data)
 {
@@ -51,9 +52,11 @@ xt_status jabber_pkt_iq(struct xt_node *node, gpointer data)
 		      (c = xt_find_node(node->children, "ping")) ||
 		      (c = xt_find_node(node->children, "time"))) ||
 		    !(s = xt_find_attr(c, "xmlns"))) {
-			/* Sigh. Who decided to suddenly invent new elements
-			   instead of just sticking with <query/>? */
-			return XT_HANDLED;
+
+			reply = jabber_make_error_packet(node, "service-unavailable", "cancel", NULL);
+			st = jabber_write_packet(ic, reply);
+			xt_free_node(reply);
+			return st;
 		}
 
 		reply = xt_new_node("query", NULL, NULL);
@@ -63,7 +66,6 @@ xt_status jabber_pkt_iq(struct xt_node *node, gpointer data)
 		if (strcmp(s, XMLNS_VERSION) == 0) {
 			xt_add_child(reply, xt_new_node("name", set_getstr(&ic->acc->set, "user_agent"), NULL));
 			xt_add_child(reply, xt_new_node("version", BITLBEE_VERSION, NULL));
-			xt_add_child(reply, xt_new_node("os", ARCH, NULL));
 		} else if (strcmp(s, XMLNS_TIME_OLD) == 0) {
 			time_t time_ep;
 			char buf[1024];
@@ -117,6 +119,7 @@ xt_status jabber_pkt_iq(struct xt_node *node, gpointer data)
 				                   XMLNS_SI,
 				                   XMLNS_BYTESTREAMS,
 				                   XMLNS_FILETRANSFER,
+				                   XMLNS_CARBONS,
 				                   NULL };
 			const char **f;
 
@@ -133,7 +136,7 @@ xt_status jabber_pkt_iq(struct xt_node *node, gpointer data)
 			}
 		} else {
 			xt_free_node(reply);
-			reply = jabber_make_error_packet(node, "feature-not-implemented", "cancel", NULL);
+			reply = jabber_make_error_packet(node, "service-unavailable", "cancel", NULL);
 			pack = 0;
 		}
 	} else if (strcmp(type, "set") == 0) {
@@ -229,7 +232,7 @@ static xt_status jabber_do_iq_auth(struct im_connection *ic, struct xt_node *nod
 	if (!(query = xt_find_node(node->children, "query"))) {
 		imcb_log(ic, "Warning: Received incomplete IQ packet while authenticating");
 		imc_logout(ic, FALSE);
-		return XT_HANDLED;
+		return XT_ABORT;
 	}
 
 	/* Time to authenticate ourselves! */
@@ -282,7 +285,7 @@ static xt_status jabber_finish_iq_auth(struct im_connection *ic, struct xt_node 
 	if (!(type = xt_find_attr(node, "type"))) {
 		imcb_log(ic, "Warning: Received incomplete IQ packet while authenticating");
 		imc_logout(ic, FALSE);
-		return XT_HANDLED;
+		return XT_ABORT;
 	}
 
 	if (strcmp(type, "error") == 0) {
@@ -384,8 +387,8 @@ static xt_status jabber_gmail_handle_new(struct im_connection *ic, struct xt_nod
 {
 	struct xt_node *response;
 	struct jabber_data *jd = ic->proto_data;
-
-	response = jabber_make_packet("iq", "result", g_strdup_printf("%s@%s", jd->username, jd->server), NULL);
+	
+	response = jabber_make_packet("iq", "result", jd->me, NULL);
 
 	jabber_cache_add(ic, response, NULL);
 	if (!jabber_write_packet(ic, response)) {
@@ -1003,9 +1006,26 @@ static xt_status jabber_iq_disco_server_response(struct im_connection *ic,
                                                  struct xt_node *node, struct xt_node *orig)
 {
 	struct jabber_data *jd = ic->proto_data;
-	struct xt_node *id;
+	struct xt_node *query, *id;
 
-	if ((id = xt_find_path(node, "query/identity"))) {
+	if (!(query = xt_find_node(node->children, "query"))) {
+		return XT_HANDLED;
+	}
+
+	if (xt_find_node_by_attr(query->children, "feature", "var", XMLNS_CARBONS) &&
+	    set_getbool(&ic->acc->set, "carbons")) {
+
+		struct xt_node *enable, *iq;
+
+		enable = xt_new_node("enable", NULL, NULL);
+		xt_add_attr(enable, "xmlns", XMLNS_CARBONS);
+		iq = jabber_make_packet("iq", "set", NULL, enable);
+
+		jabber_cache_add(ic, iq, jabber_iq_carbons_response);
+		jabber_write_packet(ic, iq);
+	}
+
+	if ((id = xt_find_node(query->children, "identity"))) {
 		char *cat, *type, *name;
 
 		if (!(cat = xt_find_attr(id, "category")) ||
@@ -1019,6 +1039,81 @@ static xt_status jabber_iq_disco_server_response(struct im_connection *ic,
 			jd->flags |= JFLAG_GTALK;
 		}
 	}
+
+	return XT_HANDLED;
+}
+
+static xt_status jabber_iq_carbons_response(struct im_connection *ic,
+                                            struct xt_node *node, struct xt_node *orig)
+{
+	struct jabber_error *err;
+
+	if ((err = jabber_error_parse(xt_find_node(node->children, "error"), XMLNS_STANZA_ERROR))) {
+		imcb_error(ic, "Error enabling carbons: %s%s%s",
+		           err->code, err->text ? ": " : "", err->text ? err->text : "");
+		jabber_error_free(err);
+	} else {
+		imcb_log(ic, "Carbons enabled");
+	}
+
+	return XT_HANDLED;
+}
+
+xt_status jabber_iq_disco_muc_response(struct im_connection *ic, struct xt_node *node, struct xt_node *orig);
+
+int jabber_iq_disco_muc(struct im_connection *ic, const char *muc_server)
+{
+	struct xt_node *node;
+	int st;
+
+	node = xt_new_node("query", NULL, NULL);
+	xt_add_attr(node, "xmlns", XMLNS_DISCO_ITEMS);
+	node = jabber_make_packet("iq", "get", (char *) muc_server, node);
+
+	jabber_cache_add(ic, node, jabber_iq_disco_muc_response);
+	st = jabber_write_packet(ic, node);
+
+	return st;
+}
+
+xt_status jabber_iq_disco_muc_response(struct im_connection *ic, struct xt_node *node, struct xt_node *orig)
+{
+	struct xt_node *query, *c;
+	struct jabber_error *err;
+	GSList *rooms =  NULL;
+
+	if ((err = jabber_error_parse(xt_find_node(node->children, "error"), XMLNS_STANZA_ERROR))) {
+		imcb_error(ic, "The server replied with an error: %s%s%s",
+		           err->code, err->text ? ": " : "", err->text ? err->text : "");
+		jabber_error_free(err);
+		return XT_HANDLED;
+	}
+
+	if (!(query = xt_find_node(node->children, "query"))) {
+		imcb_error(ic, "Received incomplete MUC list reply");
+		return XT_HANDLED;
+	}
+
+	c = query->children;
+	while ((c = xt_find_node(c, "item"))) {
+		char *jid = xt_find_attr(c, "jid");
+
+		if (!jid || !strchr(jid, '@')) {
+			c = c->next;
+			continue;
+		}
+
+		bee_chat_info_t *ci = g_new(bee_chat_info_t, 1);
+		ci->title = g_strdup(xt_find_attr(c, "jid"));
+		ci->topic = g_strdup(xt_find_attr(c, "name"));
+		rooms = g_slist_prepend(rooms, ci);
+
+		c = c->next;
+	}
+
+	imcb_chat_list_free(ic);
+	ic->chatlist = g_slist_reverse(rooms);
+	imcb_chat_list_finish(ic);
 
 	return XT_HANDLED;
 }

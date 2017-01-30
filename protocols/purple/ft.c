@@ -41,6 +41,7 @@ struct prpl_xfer_data {
 	int fd;
 	char *fn, *handle;
 	gboolean ui_wants_data;
+	int timeout;
 };
 
 static file_transfer_t *next_ft;
@@ -63,19 +64,56 @@ static void prpl_xfer_canceled(struct file_transfer *ft, char *reason)
 {
 	struct prpl_xfer_data *px = ft->data;
 
-	purple_xfer_request_denied(px->xfer);
+	if (px->xfer) {
+		if (!purple_xfer_is_completed(px->xfer) && !purple_xfer_is_canceled(px->xfer)) {
+			purple_xfer_cancel_local(px->xfer);
+		}
+		px->xfer->ui_data = NULL;
+		purple_xfer_unref(px->xfer);
+		px->xfer = NULL;
+	}
+}
+
+static void prpl_xfer_free(struct file_transfer *ft)
+{
+	struct prpl_xfer_data *px = ft->data;
+	struct purple_data *pd = px->ic->proto_data;
+
+	pd->filetransfers = g_slist_remove(pd->filetransfers, px);
+
+	if (px->xfer) {
+		px->xfer->ui_data = NULL;
+		purple_xfer_unref(px->xfer);
+	}
+
+	if (px->timeout) {
+		b_event_remove(px->timeout);
+	}
+
+	g_free(px->fn);
+	g_free(px->handle);
+	if (px->fd >= 0) {
+		close(px->fd);
+	}
+	g_free(px);
 }
 
 static void prplcb_xfer_new(PurpleXfer *xfer)
 {
+	purple_xfer_ref(xfer);
+
 	if (purple_xfer_get_type(xfer) == PURPLE_XFER_RECEIVE) {
 		struct prpl_xfer_data *px = g_new0(struct prpl_xfer_data, 1);
+		struct purple_data *pd;
 
 		xfer->ui_data = px;
 		px->xfer = xfer;
 		px->fn = mktemp(g_strdup("/tmp/bitlbee-purple-ft.XXXXXX"));
 		px->fd = -1;
 		px->ic = purple_ic_by_pa(xfer->account);
+
+		pd = px->ic->proto_data;
+		pd->filetransfers = g_slist_prepend(pd->filetransfers, px);
 
 		purple_xfer_set_local_filename(xfer, px->fn);
 
@@ -107,10 +145,15 @@ static gboolean prplcb_xfer_new_send_cb(gpointer data, gint fd, b_input_conditio
 	/* TODO(wilmer): After spreading some more const goodness in BitlBee,
 	   remove the evil cast below. */
 	px->ft = imcb_file_send_start(ic, (char *) who, xfer->filename, xfer->size);
+
+	if (!px->ft) {
+		return FALSE;
+	}
 	px->ft->data = px;
 
 	px->ft->accept = prpl_xfer_accept;
 	px->ft->canceled = prpl_xfer_canceled;
+	px->ft->free = prpl_xfer_free;
 	px->ft->write_request = prpl_xfer_write_request;
 
 	return FALSE;
@@ -163,17 +206,13 @@ static gboolean prpl_xfer_write_request(struct file_transfer *ft)
 }
 
 
-/* Generic (IM<>UI): */
 static void prplcb_xfer_destroy(PurpleXfer *xfer)
 {
 	struct prpl_xfer_data *px = xfer->ui_data;
 
-	g_free(px->fn);
-	g_free(px->handle);
-	if (px->fd >= 0) {
-		close(px->fd);
+	if (px) {
+		px->xfer = NULL;
 	}
-	g_free(px);
 }
 
 static void prplcb_xfer_progress(PurpleXfer *xfer, double percent)
@@ -223,17 +262,12 @@ static void prplcb_xfer_cancel_remote(PurpleXfer *xfer)
 {
 	struct prpl_xfer_data *px = xfer->ui_data;
 
-	if (px->ft) {
+	if (px && px->ft) {
 		imcb_file_canceled(px->ic, px->ft, "Canceled by remote end");
-	} else {
+	} else if (px) {
 		/* px->ft == NULL for sends, because of the two stages. :-/ */
 		imcb_error(px->ic, "File transfer cancelled by remote end");
 	}
-}
-
-static void prplcb_xfer_dbg(PurpleXfer *xfer)
-{
-	fprintf(stderr, "prplcb_xfer_dbg 0x%p\n", xfer);
 }
 
 
@@ -244,10 +278,12 @@ static gboolean purple_transfer_request_cb(gpointer data, gint fd, b_input_condi
 void purple_transfer_request(struct im_connection *ic, file_transfer_t *ft, char *handle)
 {
 	struct prpl_xfer_data *px = g_new0(struct prpl_xfer_data, 1);
+	struct purple_data *pd;
 	char *dir, *basename;
 
 	ft->data = px;
 	px->ft = ft;
+	px->ft->free = prpl_xfer_free;
 
 	dir = g_strdup("/tmp/bitlbee-purple-ft.XXXXXX");
 	if (!mkdtemp(dir)) {
@@ -276,10 +312,13 @@ void purple_transfer_request(struct im_connection *ic, file_transfer_t *ft, char
 	px->ic = ic;
 	px->handle = g_strdup(handle);
 
+	pd = px->ic->proto_data;
+	pd->filetransfers = g_slist_prepend(pd->filetransfers, px);
+
 	imcb_log(ic,
 	         "Due to libpurple limitations, the file has to be cached locally before proceeding with the actual file transfer. Please wait...");
 
-	b_timeout_add(0, purple_transfer_request_cb, ft);
+	px->timeout = b_timeout_add(0, purple_transfer_request_cb, ft);
 }
 
 static void purple_transfer_forward(struct file_transfer *ft)
@@ -298,6 +337,8 @@ static gboolean purple_transfer_request_cb(gpointer data, gint fd, b_input_condi
 {
 	file_transfer_t *ft = data;
 	struct prpl_xfer_data *px = ft->data;
+
+	px->timeout = 0;
 
 	if (ft->write == NULL) {
 		ft->write = prpl_xfer_write;
@@ -326,23 +367,38 @@ static gboolean prpl_xfer_write(struct file_transfer *ft, char *buffer, unsigned
 		imcb_file_finished(px->ic, ft);
 		px->ft = NULL;
 	} else {
-		b_timeout_add(0, purple_transfer_request_cb, ft);
+		px->timeout = b_timeout_add(0, purple_transfer_request_cb, ft);
 	}
 
 	return TRUE;
+}
+
+void purple_transfer_cancel_all(struct im_connection *ic)
+{
+	struct purple_data *pd = ic->proto_data;
+
+	while (pd->filetransfers) {
+		struct prpl_xfer_data *px = pd->filetransfers->data;
+
+		if (px->ft) {
+			imcb_file_canceled(ic, px->ft, "Logging out");
+		}
+
+		pd->filetransfers = g_slist_remove(pd->filetransfers, px);
+	}
 }
 
 
 
 PurpleXferUiOps bee_xfer_uiops =
 {
-	prplcb_xfer_new,
-	prplcb_xfer_destroy,
-	NULL, /* prplcb_xfer_add, */
-	prplcb_xfer_progress,
-	prplcb_xfer_dbg,
-	prplcb_xfer_cancel_remote,
-	NULL,
-	NULL,
-	prplcb_xfer_dbg,
+	prplcb_xfer_new,           /* new_xfer */
+	prplcb_xfer_destroy,       /* destroy */
+	NULL,                      /* add_xfer */
+	prplcb_xfer_progress,      /* update_progress */
+	NULL,                      /* cancel_local */
+	prplcb_xfer_cancel_remote, /* cancel_remote */
+	NULL,                      /* ui_write */
+	NULL,                      /* ui_read */
+	NULL,                      /* data_not_sent */
 };

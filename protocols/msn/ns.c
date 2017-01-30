@@ -109,6 +109,9 @@ static gboolean msn_ns_connected(gpointer data, gint source, b_input_condition c
 	struct msn_data *md = data;
 	struct im_connection *ic = md->ic;
 
+	/* this should be taken from XFR, but hardcoding it for now. it also prevents more redirects. */
+	const char *redir_data = "VmVyc2lvbjogMQ0KWGZyQ291bnQ6IDINCklzR2VvWGZyOiB0cnVlDQo=";
+
 	if (source == -1 && !md->is_http) {
 		imcb_error(ic, "Could not connect to server");
 		imc_logout(ic, TRUE);
@@ -134,7 +137,13 @@ static gboolean msn_ns_connected(gpointer data, gint source, b_input_condition c
 		memcpy(md->uuid, "b171be3e", 8);   /* :-P */
 	}
 
-	if (msn_ns_write(ic, source, "VER %d %s CVR0\r\n", ++md->trId, MSNP_VER)) {
+	/* Having to handle potential errors in each write sure makes these ifs awkward...*/
+
+	if (msn_ns_write(ic, source, "VER %d %s CVR0\r\n", ++md->trId, MSNP_VER) &&
+	    msn_ns_write(ic, source, "CVR %d 0x0409 mac 10.2.0 ppc macmsgs 3.5.1 macmsgs %s %s\r\n",
+	                 ++md->trId, ic->acc->user, redir_data) &&
+	    msn_ns_write(ic, md->fd, "USR %d SSO I %s\r\n", ++md->trId, ic->acc->user)) {
+
 		if (!md->is_http) {
 			md->inpa = b_input_add(md->fd, B_EV_IO_READ, msn_ns_callback, md);
 		}
@@ -207,11 +216,8 @@ int msn_ns_command(struct msn_data *md, char **cmd, int num_parts)
 			return(0);
 		}
 
-		return(msn_ns_write(ic, md->fd, "CVR %d 0x0409 mac 10.2.0 ppc macmsgs 3.5.1 macmsgs %s VmVyc2lvbjogMQ0KWGZyQ291bnQ6IDINClhmclNlbnRVVENUaW1lOiA2MzU2MTQ3OTU5NzgzOTAwMDANCklzR2VvWGZyOiB0cnVlDQo=\r\n",
-		                    ++md->trId, ic->acc->user));
 	} else if (strcmp(cmd[0], "CVR") == 0) {
 		/* We don't give a damn about the information we just received */
-		return msn_ns_write(ic, md->fd, "USR %d SSO I %s\r\n", ++md->trId, ic->acc->user);
 	} else if (strcmp(cmd[0], "XFR") == 0) {
 		char *server;
 		int port;
@@ -279,6 +285,8 @@ int msn_ns_command(struct msn_data *md, char **cmd, int num_parts)
 		} else if (num_parts >= 3) {
 			md->msglen = atoi(cmd[2]);
 		}
+	} else if (strcmp(cmd[0], "RML") == 0) {
+		/* Move along, nothing to see here */
 	} else if (strcmp(cmd[0], "CHL") == 0) {
 		char *resp;
 		int st;
@@ -615,7 +623,13 @@ void msn_auth_got_passport_token(struct im_connection *ic, const char *token, co
 		msn_ns_write(ic, -1, "USR %d SSO S %s %s {%s}\r\n", ++md->trId, md->tokens[0], token, md->uuid);
 	} else {
 		imcb_error(ic, "Error during Passport authentication: %s", error);
-		imc_logout(ic, TRUE);
+
+		/* don't reconnect with auth errors */
+		if (error && g_str_has_prefix(error, "wsse:FailedAuthentication")) {
+			imc_logout(ic, FALSE);
+		} else {
+			imc_logout(ic, TRUE);
+		}
 	}
 }
 

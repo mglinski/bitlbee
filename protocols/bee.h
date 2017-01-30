@@ -61,6 +61,7 @@ typedef enum {
 	BEE_USER_MOBILE = 8,    /* Compatibility with old OPT_MOBILE flag */
 	BEE_USER_LOCAL = 256,   /* Locally-added contacts (not in real contact list) */
 	BEE_USER_SPECIAL = 512, /* Denotes a user as being special */
+	BEE_USER_NOOTR = 4096,  /* Per-user version of OPT_NOOTR */
 } bee_user_flags_t;
 
 typedef struct bee_user {
@@ -81,6 +82,11 @@ typedef struct bee_user {
 	void *ui_data;
 	void *data; /* Can be used by the IM module. */
 } bee_user_t;
+
+typedef struct bee_chat_info {
+	char *title;
+	char *topic;
+} bee_chat_info_t;
 
 /* This one's mostly used so save space and make it easier (cheaper) to
    compare groups of contacts, etc. */
@@ -127,6 +133,9 @@ typedef struct bee_ui_funcs {
 	gboolean (*ft_out_start)(struct im_connection *ic, struct file_transfer *ft);
 	void (*ft_close)(struct im_connection *ic, struct file_transfer *ft);
 	void (*ft_finished)(struct im_connection *ic, struct file_transfer *ft);
+
+	void (*log)(bee_t *bee, const char *tag, const char *msg);
+	gboolean (*user_nick_change)(bee_t *bee, bee_user_t *bu, const char *hint);
 } bee_ui_funcs_t;
 
 
@@ -179,5 +188,9 @@ G_MODULE_EXPORT void imcb_chat_remove_buddy(struct groupchat *c, const char *han
 G_MODULE_EXPORT int bee_chat_msg(bee_t *bee, struct groupchat *c, const char *msg, int flags);
 G_MODULE_EXPORT struct groupchat *bee_chat_by_title(bee_t *bee, struct im_connection *ic, const char *title);
 G_MODULE_EXPORT void imcb_chat_invite(struct im_connection *ic, const char *name, const char *who, const char *msg);
+
+G_GNUC_DEPRECATED G_MODULE_EXPORT void bee_chat_list_finish(struct im_connection *ic);
+G_MODULE_EXPORT void imcb_chat_list_finish(struct im_connection *ic);
+G_MODULE_EXPORT void imcb_chat_list_free(struct im_connection *ic);
 
 #endif /* __BEE_H__ */

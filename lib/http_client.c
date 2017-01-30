@@ -94,7 +94,7 @@ struct http_request *http_dorequest_url(char *url_string, http_input_function fu
 
 	request = g_strdup_printf("GET %s HTTP/1.0\r\n"
 	                          "Host: %s\r\n"
-	                          "User-Agent: BitlBee " BITLBEE_VERSION " " ARCH "/" CPU "\r\n"
+	                          "User-Agent: BitlBee " BITLBEE_VERSION "\r\n"
 	                          "\r\n", url->file, url->host);
 
 	ret = http_dorequest(url->host, url->port,
@@ -161,7 +161,9 @@ error:
 		req->status_string = g_strdup("Error while writing HTTP request");
 	}
 
-	req->func(req);
+	if (req->func != NULL) {
+		req->func(req);
+	}
 	http_free(req);
 	return FALSE;
 }
@@ -298,7 +300,9 @@ cleanup:
 		       req->status_string ? req->status_string : "NULL");
 	}
 
-	req->func(req);
+	if (req->func != NULL) {
+		req->func(req);
+	}
 	http_free(req);
 	return FALSE;
 }
@@ -411,7 +415,7 @@ static http_ret_t http_process_data(struct http_request *req, const char *buffer
 		req->body_size = req->sblen - pos;
 	}
 
-	if ((req->flags & HTTPC_STREAMING) && req->reply_body) {
+	if ((req->flags & HTTPC_STREAMING) && req->reply_body && req->func != NULL) {
 		req->func(req);
 	}
 
@@ -695,7 +699,7 @@ void http_close(struct http_request *req)
 	if (req->ssl) {
 		ssl_disconnect(req->ssl);
 	} else {
-		closesocket(req->fd);
+		proxy_disconnect(req->fd);
 	}
 
 	http_free(req);

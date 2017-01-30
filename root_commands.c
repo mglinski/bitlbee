@@ -142,10 +142,9 @@ static void cmd_identify(irc_t *irc, char **cmd)
 		return;
 	}
 
-	if (load) {
+	status = auth_check_pass(irc, irc->user->nick, password);
+	if (load && (status == STORAGE_OK)) {
 		status = storage_load(irc, password);
-	} else {
-		status = storage_check_pass(irc->user->nick, password);
 	}
 
 	switch (status) {
@@ -158,9 +157,14 @@ static void cmd_identify(irc_t *irc, char **cmd)
 	case STORAGE_OK:
 		irc_rootmsg(irc, "Password accepted%s",
 		            load ? ", settings and accounts loaded" : "");
-		irc_setpass(irc, password);
 		irc->status |= USTATUS_IDENTIFIED;
 		irc_umode_set(irc, "+R", 1);
+
+		if (irc->caps & CAP_SASL) {
+			irc_user_t *iu = irc->user;
+			irc_send_num(irc, 900, "%s!%s@%s %s :You are now logged in as %s",
+				iu->nick, iu->user, iu->host, iu->nick, iu->nick);
+		}
 
 		bitlbee_whatsnew(irc);
 
@@ -238,6 +242,12 @@ static void cmd_register(irc_t *irc, char **cmd)
 		irc->status |= USTATUS_IDENTIFIED;
 		irc_umode_set(irc, "+R", 1);
 
+		if (irc->caps & CAP_SASL) {
+			irc_user_t *iu = irc->user;
+			irc_send_num(irc, 900, "%s!%s@%s %s :You are now logged in as %s",
+				iu->nick, iu->user, iu->host, iu->nick, iu->nick);
+		}
+
 		/* Set this var now, or anyone who logs in to his/her
 		   newly created account for the first time gets the
 		   whatsnew story. */
@@ -255,7 +265,11 @@ static void cmd_drop(irc_t *irc, char **cmd)
 {
 	storage_status_t status;
 
-	status = storage_remove(irc->user->nick, cmd[1]);
+	status = auth_check_pass(irc, irc->user->nick, cmd[1]);
+	if (status == STORAGE_OK) {
+		status = storage_remove(irc->user->nick);
+	}
+
 	switch (status) {
 	case STORAGE_NO_SUCH_USER:
 		irc_rootmsg(irc, "That account does not exist");
@@ -327,6 +341,10 @@ static int cmd_set_real(irc_t *irc, char **cmd, set_t **head, cmd_set_checkflags
 		set_t *s = set_find(head, set_name);
 		int st;
 
+		if (s && s->flags & SET_LOCKED) {
+			irc_rootmsg(irc, "This setting can not be changed");
+			return 0;
+		}
 		if (s && checkflags && checkflags(irc, s) == 0) {
 			return 0;
 		}
@@ -375,6 +393,9 @@ static int cmd_account_set_checkflags(irc_t *irc, set_t *s)
 	} else if (!a->ic && s && s->flags & ACC_SET_ONLINE_ONLY) {
 		irc_rootmsg(irc, "This setting can only be changed when the account is %s-line", "on");
 		return 0;
+	} else if (a->flags & ACC_FLAG_LOCKED && s && s->flags & ACC_SET_LOCKABLE) {
+		irc_rootmsg(irc, "This setting can not be changed for locked accounts");
+		return 0;
 	}
 
 	return 1;
@@ -397,6 +418,11 @@ static void cmd_account(irc_t *irc, char **cmd)
 
 		MIN_ARGS(3);
 
+		if (!global.conf->allow_account_add) {
+			irc_rootmsg(irc, "This server does not allow adding new accounts");
+			return;
+		}
+
 		if (cmd[4] == NULL) {
 			for (a = irc->b->accounts; a; a = a->next) {
 				if (strcmp(a->pass, PASSWORD_PENDING) == 0) {
@@ -412,7 +438,10 @@ static void cmd_account(irc_t *irc, char **cmd)
 		prpl = find_protocol(cmd[2]);
 
 		if (prpl == NULL) {
+			char *msg = explain_unknown_protocol(cmd[2]);
 			irc_rootmsg(irc, "Unknown protocol");
+			irc_rootmsg(irc, msg);
+			g_free(msg);
 			return;
 		}
 
@@ -439,6 +468,13 @@ static void cmd_account(irc_t *irc, char **cmd)
 				*a->pass = '\0';
 				irc_rootmsg(irc, "No need to enter a password for this "
 				            "account since it's using OAuth");
+			} else if (prpl->options & PRPL_OPT_NO_PASSWORD) {
+				*a->pass = '\0';
+			} else if (prpl->options & PRPL_OPT_PASSWORD_OPTIONAL) {
+				*a->pass = '\0';
+				irc_rootmsg(irc, "Passwords are optional for this account. "
+				            "If you wish to enter the password with /OPER, do "
+				            "account %s set -del password", a->tag);
 			} else {
 				irc_rootmsg(irc, "You can now use the /OPER command to "
 				            "enter the password");
@@ -448,6 +484,8 @@ static void cmd_account(irc_t *irc, char **cmd)
 					            "set oauth on", a->tag);
 				}
 			}
+		} else if (prpl->options & PRPL_OPT_NO_PASSWORD) {
+			irc_rootmsg(irc, "Note: this account doesn't use password for login");
 		}
 
 		return;
@@ -459,7 +497,7 @@ static void cmd_account(irc_t *irc, char **cmd)
 		}
 
 		for (a = irc->b->accounts; a; a = a->next) {
-			char *con;
+			char *con = NULL, *protocol = NULL;
 
 			if (a->ic && (a->ic->flags & OPT_LOGGED_IN)) {
 				con = " (connected)";
@@ -471,7 +509,14 @@ static void cmd_account(irc_t *irc, char **cmd)
 				con = "";
 			}
 
-			irc_rootmsg(irc, "%2d (%s): %s, %s%s", i, a->tag, a->prpl->name, a->user, con);
+			if (a->prpl == &protocol_missing) {
+				protocol = g_strdup_printf("%s (missing!)", set_getstr(&a->set, "_protocol_name"));
+			} else {
+				protocol = g_strdup(a->prpl->name);
+			}
+
+			irc_rootmsg(irc, "%2d (%s): %s, %s%s", i, a->tag, protocol, a->user, con);
+			g_free(protocol);
 
 			i++;
 		}
@@ -485,7 +530,7 @@ static void cmd_account(irc_t *irc, char **cmd)
 			irc_rootmsg(irc, "Trying to get all accounts connected...");
 
 			for (a = irc->b->accounts; a; a = a->next) {
-				if (!a->ic && a->auto_connect) {
+				if (!a->ic && a->auto_connect && a->prpl != &protocol_missing) {
 					if (strcmp(a->pass, PASSWORD_PENDING) == 0) {
 						irc_rootmsg(irc, "Enter password for account %s "
 						            "first (use /OPER)", a->tag);
@@ -530,7 +575,10 @@ static void cmd_account(irc_t *irc, char **cmd)
 	}
 
 	if (len >= 1 && g_strncasecmp(cmd[2], "del", len) == 0) {
-		if (a->ic) {
+		if (a->flags & ACC_FLAG_LOCKED) {
+			irc_rootmsg(irc, "Account is locked, can't delete");
+		}
+		else if (a->ic) {
 			irc_rootmsg(irc, "Account is still logged in, can't delete");
 		} else {
 			account_del(irc->b, a);
@@ -542,6 +590,12 @@ static void cmd_account(irc_t *irc, char **cmd)
 		} else if (strcmp(a->pass, PASSWORD_PENDING) == 0) {
 			irc_rootmsg(irc, "Enter password for account %s "
 			            "first (use /OPER)", a->tag);
+		} else if (a->prpl == &protocol_missing) {
+			char *proto = set_getstr(&a->set, "_protocol_name");
+			char *msg = explain_unknown_protocol(proto);
+			irc_rootmsg(irc, "Unknown protocol `%s'", proto);
+			irc_rootmsg(irc, msg);
+			g_free(msg);
 		} else {
 			account_on(irc->b, a);
 		}
@@ -1009,7 +1063,7 @@ static void cmd_blist(irc_t *irc, char **cmd)
 	if (strchr(irc->umode, 'b') != NULL) {
 		format = "%s\t%s\t%s";
 	} else {
-		format = "%-16.16s  %-40.40s  %s";
+		format = "%-24.24s  %-40.40s  %s";
 	}
 
 	irc_rootmsg(irc, format, "Nick", "Handle/Account", "Status");
@@ -1073,6 +1127,135 @@ static void cmd_blist(irc_t *irc, char **cmd)
 	}
 }
 
+static gint prplcmp(gconstpointer a, gconstpointer b)
+{
+	const struct prpl *pa = a;
+	const struct prpl *pb = b;
+
+	return g_strcasecmp(pa->name, pb->name);
+}
+
+static void prplstr(GList *prpls, GString *gstr)
+{
+	const char *last = NULL;
+	GList *l;
+	struct prpl *p;
+
+	prpls = g_list_copy(prpls);
+	prpls = g_list_sort(prpls, prplcmp);
+
+	for (l = prpls; l; l = l->next) {
+		p = l->data;
+
+		if (last && g_strcasecmp(p->name, last) == 0) {
+			/* Ignore duplicates (mainly for libpurple) */
+			continue;
+		}
+
+		if (gstr->len != 0) {
+			g_string_append(gstr, ", ");
+		}
+
+		g_string_append(gstr, p->name);
+		last = p->name;
+	}
+
+	g_list_free(prpls);
+}
+
+static void cmd_plugins_info(irc_t *irc, char **cmd)
+{
+	GList *l;
+	struct plugin_info *info;
+
+	MIN_ARGS(2);
+
+	for (l = get_plugins(); l; l = l->next) {
+		info = l->data;
+		if (g_strcasecmp(cmd[2], info->name) == 0) {
+			break;
+		}
+	}
+
+	if (!l) {
+		return;
+	}
+
+	irc_rootmsg(irc, "%s:", info->name);
+	irc_rootmsg(irc, "  Version: %s", info->version);
+
+	if (info->description) {
+		irc_rootmsg(irc, "  Description: %s", info->description);
+	}
+
+	if (info->author) {
+		irc_rootmsg(irc, "  Author: %s", info->author);
+	}
+
+	if (info->url) {
+		irc_rootmsg(irc, "  URL: %s", info->url);
+	}
+}
+
+static void cmd_plugins(irc_t *irc, char **cmd)
+{
+	GList *prpls;
+	GString *gstr;
+
+	if (cmd[1] && g_strcasecmp(cmd[1], "info") == 0) {
+		cmd_plugins_info(irc, cmd);
+		return;
+	}
+
+#ifdef WITH_PLUGINS
+	GList *l;
+	struct plugin_info *info;
+	char *format;
+
+	if (strchr(irc->umode, 'b') != NULL) {
+		format = "%s\t%s";
+	} else {
+		format = "%-30s  %s";
+	}
+
+	irc_rootmsg(irc, format, "Plugin", "Version");
+
+	for (l = get_plugins(); l; l = l->next) {
+		char *c;
+		info = l->data;
+
+		/* some purple plugins like to include several versions separated by newlines... */
+		if ((c = strchr(info->version, '\n'))) {
+			char *version = g_strndup(info->version, c - info->version);
+			irc_rootmsg(irc, format, info->name, version);
+			g_free(version);
+		} else {
+			irc_rootmsg(irc, format, info->name, info->version);
+		}
+	}
+#endif
+
+	irc_rootmsg(irc, "");
+
+	gstr = g_string_new(NULL);
+	prpls = get_protocols();
+
+	if (prpls) {
+		prplstr(prpls, gstr);
+		irc_rootmsg(irc, "Enabled Protocols: %s", gstr->str);
+		g_string_truncate(gstr, 0);
+	}
+
+	prpls = get_protocols_disabled();
+
+	if (prpls) {
+		prplstr(prpls, gstr);
+		irc_rootmsg(irc, "Disabled Protocols: %s", gstr->str);
+	}
+
+	g_string_free(gstr, TRUE);
+}
+
 static void cmd_qlist(irc_t *irc, char **cmd)
 {
 	query_t *q = irc->queries;
@@ -1099,8 +1282,10 @@ static void cmd_chat(irc_t *irc, char **cmd)
 	account_t *acc;
 
 	if (g_strcasecmp(cmd[1], "add") == 0) {
-		char *channel, *s;
+		bee_chat_info_t *ci;
+		char *channel, *room, *s;
 		struct irc_channel *ic;
+		guint i;
 
 		MIN_ARGS(3);
 
@@ -1112,8 +1297,30 @@ static void cmd_chat(irc_t *irc, char **cmd)
 			return;
 		}
 
+		if (cmd[3][0] == '!') {
+			if (!acc->ic || !(acc->ic->flags & OPT_LOGGED_IN)) {
+				irc_rootmsg(irc, "Not logged in to account.");
+				return;
+			} else if (!acc->prpl->chat_list) {
+				irc_rootmsg(irc, "Listing chatrooms not supported on that account.");
+				return;
+			}
+
+			i = g_ascii_strtoull(cmd[3] + 1, NULL, 10);
+			ci = g_slist_nth_data(acc->ic->chatlist, i - 1);
+
+			if (ci == NULL) {
+				irc_rootmsg(irc, "Invalid chatroom index");
+				return;
+			}
+
+			room = ci->title;
+		} else {
+			room = cmd[3];
+		}
+
 		if (cmd[4] == NULL) {
-			channel = g_strdup(cmd[3]);
+			channel = g_strdup(room);
 			if ((s = strchr(channel, '@'))) {
 				*s = 0;
 			}
@@ -1133,7 +1340,7 @@ static void cmd_chat(irc_t *irc, char **cmd)
 		    set_setstr(&ic->set, "type", "chat") &&
 		    set_setstr(&ic->set, "chat_type", "room") &&
 		    set_setstr(&ic->set, "account", cmd[2]) &&
-		    set_setstr(&ic->set, "room", cmd[3])) {
+		    set_setstr(&ic->set, "room", room)) {
 			irc_rootmsg(irc, "Chatroom successfully added.");
 		} else {
 			if (ic) {
@@ -1143,6 +1350,21 @@ static void cmd_chat(irc_t *irc, char **cmd)
 			irc_rootmsg(irc, "Could not add chatroom.");
 		}
 		g_free(channel);
+	} else if (g_strcasecmp(cmd[1], "list") == 0) {
+		MIN_ARGS(2);
+
+		if (!(acc = account_get(irc->b, cmd[2]))) {
+			irc_rootmsg(irc, "Invalid account");
+			return;
+		} else if (!acc->ic || !(acc->ic->flags & OPT_LOGGED_IN)) {
+			irc_rootmsg(irc, "Not logged in to account.");
+			return;
+		} else if (!acc->prpl->chat_list) {
+			irc_rootmsg(irc, "Listing chatrooms not supported on that account.");
+			return;
+		}
+
+		acc->prpl->chat_list(acc->ic, cmd[3]);
 	} else if (g_strcasecmp(cmd[1], "with") == 0) {
 		irc_user_t *iu;
 
@@ -1157,17 +1379,72 @@ static void cmd_chat(irc_t *irc, char **cmd)
 		} else {
 			irc_rootmsg(irc, "Can't open a groupchat with %s.", cmd[2]);
 		}
-	} else if (g_strcasecmp(cmd[1], "list") == 0 ||
-	           g_strcasecmp(cmd[1], "set") == 0 ||
+	} else if (g_strcasecmp(cmd[1], "set") == 0 ||
 	           g_strcasecmp(cmd[1], "del") == 0) {
-		irc_rootmsg(irc,
-		            "Warning: The \002chat\002 command was mostly replaced with the \002channel\002 command.");
-		cmd_channel(irc, cmd);
+		irc_rootmsg(irc, "Unknown command: chat %s. Did you mean \002channel %s\002?", cmd[1], cmd[1]);
 	} else {
 		irc_rootmsg(irc,
 		            "Unknown command: %s %s. Please use \x02help commands\x02 to get a list of available commands.", "chat",
 		            cmd[1]);
 	}
+}
+
+/* some arbitrary numbers */
+#define CHAT_TITLE_LEN_MIN 20
+#define CHAT_TITLE_LEN_MAX 100
+
+void cmd_chat_list_finish(struct im_connection *ic)
+{
+	account_t *acc = ic->acc;
+	bee_chat_info_t *ci;
+	char *hformat, *iformat, *topic, *padded;
+	GSList *l;
+	guint i = 0;
+	long title_len, new_len;
+	irc_t *irc = ic->bee->ui_data;
+
+	if (ic->chatlist == NULL) {
+		irc_rootmsg(irc, "No existing chatrooms");
+		return;
+	}
+
+	/* find a reasonable width for the table */
+	title_len = CHAT_TITLE_LEN_MIN;
+
+	for (l = ic->chatlist; l; l = l->next) {
+		ci = l->data;
+		new_len = g_utf8_strlen(ci->title, -1);
+
+		if (new_len >= CHAT_TITLE_LEN_MAX) {
+			title_len = CHAT_TITLE_LEN_MAX;
+			break;
+		} else if (title_len < new_len) {
+			title_len = new_len;
+		}
+	}
+
+	if (strchr(irc->umode, 'b') != NULL) {
+		hformat = "%s\t%s\t%s";
+		iformat = "%u\t%s\t%s";
+	} else {
+		hformat = "%s  %s  %s";
+		iformat = "%5u  %s  %s";
+	}
+
+	padded = str_pad_and_truncate("Title", title_len, NULL);
+	irc_rootmsg(irc, hformat, "Index", padded, "Topic");
+	g_free(padded);
+
+	for (l = ic->chatlist; l; l = l->next) {
+		ci = l->data;
+		topic = ci->topic ? ci->topic : "";
+
+		padded = str_pad_and_truncate(ci->title, title_len, "[...]");
+		irc_rootmsg(irc, iformat, ++i, padded, topic);
+		g_free(padded);
+	}
+
+	irc_rootmsg(irc, "%u %s chatrooms", i, acc->tag);
 }
 
 static void cmd_group(irc_t *irc, char **cmd)
@@ -1221,6 +1498,7 @@ static void cmd_group(irc_t *irc, char **cmd)
 static void cmd_transfer(irc_t *irc, char **cmd)
 {
 	GSList *files = irc->file_transfers;
+	GSList *next;
 
 	enum { LIST, REJECT, CANCEL };
 	int subcmd = LIST;
@@ -1238,7 +1516,8 @@ static void cmd_transfer(irc_t *irc, char **cmd)
 		subcmd = CANCEL;
 	}
 
-	for (; files; files = g_slist_next(files)) {
+	for (; files; files = next) {
+		next = files->next;
 		file_transfer_t *file = files->data;
 
 		switch (subcmd) {
@@ -1322,6 +1601,7 @@ command_t root_commands[] = {
 	{ "info",           1, cmd_info,           0 },
 	{ "nick",           1, cmd_nick,           0 },
 	{ "no",             0, cmd_yesno,          0 },
+	{ "plugins",        0, cmd_plugins,        0 },
 	{ "qlist",          0, cmd_qlist,          0 },
 	{ "register",       0, cmd_register,       0 },
 	{ "remove",         1, cmd_remove,         0 },

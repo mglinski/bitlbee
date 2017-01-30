@@ -212,6 +212,11 @@ static char *set_eval_channel_type(set_t *set, char *value)
 		return SET_INVALID;
 	}
 
+	/* Skip the free/init if nothing is being changed */
+	if (ic->f == new) {
+		return value;
+	}
+
 	/* TODO: Return values. */
 	if (ic->f && ic->f->_free) {
 		ic->f->_free(ic);
@@ -239,7 +244,9 @@ int irc_channel_add_user(irc_channel_t *ic, irc_user_t *iu)
 
 	ic->users = g_slist_insert_sorted(ic->users, icu, irc_channel_user_cmp);
 
-	irc_channel_update_ops(ic, set_getstr(&ic->irc->b->set, "ops"));
+	if (iu == ic->irc->user || iu == ic->irc->root) {
+		irc_channel_update_ops(ic, set_getstr(&ic->irc->b->set, "ops"));
+	}
 
 	if (iu == ic->irc->user || ic->flags & IRC_CHANNEL_JOINED) {
 		ic->flags |= IRC_CHANNEL_JOINED;
@@ -254,6 +261,10 @@ int irc_channel_del_user(irc_channel_t *ic, irc_user_t *iu, irc_channel_del_user
 	irc_channel_user_t *icu;
 
 	if (!(icu = irc_channel_has_user(ic, iu))) {
+		if (iu == ic->irc->user && type == IRC_CDU_KICK) {
+			/* an error happened before joining, inform the client with a numeric */
+			irc_send_num(ic->irc, 403, "%s :Error joining channel (check control channel?)", ic->name);
+		}
 		return 0;
 	}
 
@@ -426,6 +437,18 @@ void irc_channel_set_mode(irc_channel_t *ic, const char *s)
 		          irc->root->user, irc->root->host, ic->name,
 		          changes);
 	}
+}
+
+char irc_channel_user_get_prefix(irc_channel_user_t *icu)
+{
+	if (icu->flags & IRC_CHANNEL_USER_OP) {
+		return '@';
+	} else if (icu->flags & IRC_CHANNEL_USER_HALFOP) {
+		return '%';
+	} else if (icu->flags & IRC_CHANNEL_USER_VOICE) {
+		return '+';
+	}
+	return 0;
 }
 
 void irc_channel_auto_joins(irc_t *irc, account_t *acc)
@@ -614,7 +637,7 @@ char *irc_channel_name_gen(irc_t *irc, const char *hint)
 
 	irc_channel_name_strip(name);
 
-	if (set_getbool(&irc->b->set, "lcnicks")) {
+	if (set_getbool(&irc->b->set, "nick_lowercase")) {
 		nick_lc(irc, name + 1);
 	}
 

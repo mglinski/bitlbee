@@ -81,11 +81,11 @@ static void jabber_init(account_t *acc)
 	s = set_add(&acc->set, "server", NULL, set_eval_account, acc);
 	s->flags |= SET_NOSAVE | ACC_SET_OFFLINE_ONLY | SET_NULL_OK;
 
+	set_add(&acc->set, "oauth", "false", set_eval_oauth, acc);
+
 	if (strcmp(acc->prpl->name, "hipchat") == 0) {
 		set_setstr(&acc->set, "server", "chat.hipchat.com");
 	} else {
-		set_add(&acc->set, "oauth", "false", set_eval_oauth, acc);
-
 		/* this reuses set_eval_oauth, which clears the password */
 		set_add(&acc->set, "anonymous", "false", set_eval_oauth, acc);
 	}
@@ -112,6 +112,9 @@ static void jabber_init(account_t *acc)
 
 	s = set_add(&acc->set, "mail_notifications_handle", NULL, NULL, acc);
 	s->flags |= ACC_SET_OFFLINE_ONLY | SET_NULL_OK;
+
+	s = set_add(&acc->set, "carbons", "true", set_eval_bool, acc);
+	s->flags |= ACC_SET_OFFLINE_ONLY;
 
 	acc->flags |= ACC_FLAG_AWAY_MESSAGE | ACC_FLAG_STATUS_MESSAGE |
 	              ACC_FLAG_HANDLE_DOMAINS;
@@ -147,6 +150,12 @@ static void jabber_login(account_t *acc)
 		return;
 	}
 
+	if (strstr(jd->server, ".facebook.com")) {
+		imcb_error(ic, "Facebook's XMPP service is gone. Try this instead: https://wiki.bitlbee.org/HowtoFacebookMQTT");
+		imc_logout(ic, FALSE);
+		return;
+	}
+
 	if ((s = strchr(jd->server, '/'))) {
 		*s = 0;
 		set_setstr(&acc->set, "resource", s + 1);
@@ -166,11 +175,9 @@ static void jabber_login(account_t *acc)
 
 		jd->fd = jd->r_inpa = jd->w_inpa = -1;
 
-		if (strstr(jd->server, ".facebook.com")) {
-			jd->oauth2_service = &oauth2_service_facebook;
-		} else {
-			jd->oauth2_service = &oauth2_service_google;
-		}
+		/* There are no other options atm, so assume google for everything 
+		   Facebook and MSN XMPP used to be here. RIP. */
+		jd->oauth2_service = &oauth2_service_google;
 
 		oauth_params_parse(&p_in, ic->acc->pass);
 
@@ -196,6 +203,20 @@ static void jabber_login(account_t *acc)
 		oauth_params_free(&p_in);
 	} else {
 		jabber_connect(ic);
+	}
+}
+
+static void jabber_xmlconsole_enable(struct im_connection *ic)
+{
+	struct jabber_data *jd = ic->proto_data;
+	const char *handle = JABBER_XMLCONSOLE_HANDLE;
+	bee_user_t *bu;
+	
+	jd->flags |= JFLAG_XMLCONSOLE;
+
+	if (!(bu = bee_user_by_handle(ic->bee, ic, handle))) {
+		bu = bee_user_new(ic->bee, ic, handle, 0);
+		bu->flags |= BEE_USER_NOOTR;
 	}
 }
 
@@ -265,10 +286,7 @@ void jabber_connect(struct im_connection *ic)
 	}
 
 	if (set_getbool(&acc->set, "xmlconsole")) {
-		jd->flags |= JFLAG_XMLCONSOLE;
-		/* Shouldn't really do this at this stage already, maybe. But
-		   I think this shouldn't break anything. */
-		imcb_add_buddy(ic, JABBER_XMLCONSOLE_HANDLE, NULL);
+		jabber_xmlconsole_enable(ic);
 	}
 
 	if (set_getbool(&acc->set, "mail_notifications")) {
@@ -302,6 +320,8 @@ static void jabber_logout(struct im_connection *ic)
 {
 	struct jabber_data *jd = ic->proto_data;
 
+	imcb_chat_list_free(ic);
+
 	while (jd->filetransfers) {
 		imcb_file_canceled(ic, (( struct jabber_transfer *) jd->filetransfers->data)->ft, "Logging out");
 	}
@@ -333,7 +353,7 @@ static void jabber_logout(struct im_connection *ic)
 		ssl_disconnect(jd->ssl);
 	}
 	if (jd->fd >= 0) {
-		closesocket(jd->fd);
+		proxy_disconnect(jd->fd);
 	}
 
 	if (jd->tx_len) {
@@ -356,6 +376,7 @@ static void jabber_logout(struct im_connection *ic)
 	g_free(jd->away_message);
 	g_free(jd->internal_jid);
 	g_free(jd->gmail_tid);
+	g_free(jd->muc_host);
 	g_free(jd->username);
 	g_free(jd->me);
 	g_free(jd);
@@ -377,7 +398,11 @@ static int jabber_buddy_msg(struct im_connection *ic, char *who, char *message, 
 
 	if (g_strcasecmp(who, JABBER_OAUTH_HANDLE) == 0 &&
 	    !(jd->flags & OPT_LOGGED_IN) && jd->fd == -1) {
-		if (sasl_oauth2_get_refresh_token(ic, message)) {
+
+		if (jd->flags & JFLAG_HIPCHAT) {
+			sasl_oauth2_got_token(ic, message, NULL, NULL);
+			return 1;
+		} else if (sasl_oauth2_get_refresh_token(ic, message)) {
 			return 1;
 		} else {
 			imcb_error(ic, "OAuth failure");
@@ -412,6 +437,27 @@ static int jabber_buddy_msg(struct im_connection *ic, char *who, char *message, 
 
 		/* Just make sure we do this only once. */
 		bud->flags |= JBFLAG_PROBED_XEP85;
+	}
+
+	/* XEP-0364 suggests we add message processing hints (XEP-0334) to OTR messages,
+	   mostly to avoid carbons (XEP-0280) and server-side message archiving.
+	   OTR messages are roughly like this: /^\?OTR(.*\?| Error:|:)/
+	   But I'm going to simplify it to messages starting with "?OTR". */
+	if (g_str_has_prefix(message, "?OTR")) {
+		int i;
+		char *hints[] = {
+			"no-copy", XMLNS_HINTS,
+			"no-permanent-store", XMLNS_HINTS,
+			"private", XMLNS_CARBONS,
+			NULL
+		};
+			
+		for (i = 0; hints[i]; i += 2) {
+			struct xt_node *hint;
+			hint = xt_new_node(hints[i], NULL, NULL);
+			xt_add_attr(hint, "xmlns", hints[i + 1]);
+			xt_add_child(node, hint);
+		}
 	}
 
 	st = jabber_write_packet(ic, node);
@@ -473,11 +519,8 @@ static void jabber_set_away(struct im_connection *ic, char *state_txt, char *mes
 
 static void jabber_add_buddy(struct im_connection *ic, char *who, char *group)
 {
-	struct jabber_data *jd = ic->proto_data;
-
 	if (g_strcasecmp(who, JABBER_XMLCONSOLE_HANDLE) == 0) {
-		jd->flags |= JFLAG_XMLCONSOLE;
-		imcb_add_buddy(ic, JABBER_XMLCONSOLE_HANDLE, NULL);
+		jabber_xmlconsole_enable(ic);
 		return;
 	}
 
@@ -521,13 +564,26 @@ static struct groupchat *jabber_chat_join_(struct im_connection *ic, const char 
 		final_nick = (char *) nick;
 	}
 
+	if (jd->flags & JFLAG_HIPCHAT && jd->muc_host && !g_str_has_suffix(room, jd->muc_host)) {
+		char *guessed_name = hipchat_guess_channel_name(ic, room);
+		if (guessed_name) {
+			set_setstr(sets, "room", guessed_name);
+			g_free(guessed_name);
+
+			/* call this same function again with the fixed name */
+			return jabber_chat_join_(ic, set_getstr(sets, "room"), nick, password, sets);
+		}
+	}
+
 	if (strchr(room, '@') == NULL) {
 		imcb_error(ic, "%s is not a valid Jabber room name. Maybe you mean %s@conference.%s?",
 		           room, room, jd->server);
 	} else if (jabber_chat_by_jid(ic, room)) {
 		imcb_error(ic, "Already present in chat `%s'", room);
 	} else {
-		return jabber_chat_join(ic, room, final_nick, set_getstr(sets, "password"));
+		/* jabber_chat_join without the underscore is the conference.c one */
+		return jabber_chat_join(ic, room, final_nick, set_getstr(sets, "password"),
+		                        set_getbool(sets, "always_use_nicks"));
 	}
 
 	return NULL;
@@ -536,6 +592,21 @@ static struct groupchat *jabber_chat_join_(struct im_connection *ic, const char 
 static struct groupchat *jabber_chat_with_(struct im_connection *ic, char *who)
 {
 	return jabber_chat_with(ic, who);
+}
+
+static void jabber_chat_list_(struct im_connection *ic, const char *server)
+{
+	struct jabber_data *jd = ic->proto_data;
+
+	if (server && *server) {
+		jabber_iq_disco_muc(ic, server);
+	} else if (jd->muc_host && *jd->muc_host) {
+		jabber_iq_disco_muc(ic, jd->muc_host);
+	} else {
+		/* throw an error here, don't query conference.[server] directly.
+		 * for things like jabber.org it gets you 18000 results of garbage */
+		imcb_error(ic, "Please specify a server name such as `conference.%s'", jd->server);
+	}
 }
 
 static void jabber_chat_msg_(struct groupchat *c, char *message, int flags)
@@ -602,20 +673,23 @@ static void jabber_keepalive(struct im_connection *ic)
 static int jabber_send_typing(struct im_connection *ic, char *who, int typing)
 {
 	struct jabber_data *jd = ic->proto_data;
-	struct jabber_buddy *bud;
+	struct jabber_buddy *bud, *bare;
 
 	/* Enable typing notification related code from now. */
 	jd->flags |= JFLAG_WANT_TYPING;
 
-	if ((bud = jabber_buddy_by_jid(ic, who, 0)) == NULL) {
+	if ((bud = jabber_buddy_by_jid(ic, who, 0)) == NULL ||
+	    (bare = jabber_buddy_by_jid(ic, who, GET_BUDDY_BARE)) == NULL) {
 		/* Sending typing notifications to unknown buddies is
 		   unsupported for now. Shouldn't be a problem, I think. */
 		return 0;
 	}
 
-	if (bud->flags & JBFLAG_DOES_XEP85) {
+
+	if (bud->flags & JBFLAG_DOES_XEP85 || bare->flags & JBFLAG_DOES_XEP85) {
 		/* We're only allowed to send this stuff if we know the other
-		   side supports it. */
+		   side supports it. If the bare JID has the flag, all other
+		   resources get it, too (That is the case in gtalk) */
 
 		struct xt_node *node;
 		char *type;
@@ -644,6 +718,8 @@ static int jabber_send_typing(struct im_connection *ic, char *who, int typing)
 
 void jabber_chat_add_settings(account_t *acc, set_t **head)
 {
+	set_add(head, "always_use_nicks", "false", set_eval_bool, NULL);
+
 	/* Meh. Stupid room passwords. Not trying to obfuscate/hide
 	   them from the user for now. */
 	set_add(head, "password", NULL, NULL, NULL);
@@ -651,6 +727,8 @@ void jabber_chat_add_settings(account_t *acc, set_t **head)
 
 void jabber_chat_free_settings(account_t *acc, set_t **head)
 {
+	set_del(head, "always_use_nicks");
+
 	set_del(head, "password");
 }
 
@@ -718,6 +796,7 @@ void jabber_initmodule()
 	ret->chat_leave = jabber_chat_leave_;
 	ret->chat_join = jabber_chat_join_;
 	ret->chat_with = jabber_chat_with_;
+	ret->chat_list = jabber_chat_list_;
 	ret->chat_add_settings = jabber_chat_add_settings;
 	ret->chat_free_settings = jabber_chat_free_settings;
 	ret->keepalive = jabber_keepalive;

@@ -3,6 +3,127 @@ found in the git commit logs, for example you can try:
 
 https://github.com/bitlbee/bitlbee/commits/master
 
+Version 3.5.1:
+
+- purple:
+  * Fix crash on file transfer requests from unknown contacts. This was the
+    result of an incomplete fix in the previous release and may result in
+    remote DoS. Read the full security advisory at:
+    https://bugs.bitlbee.org/ticket/1282
+- After some investigation we decided to reclassify a crash fix from the
+  previous release as a security issue. Read the full security advisory at:
+  https://bugs.bitlbee.org/ticket/1281
+- Included help.txt in the release tarball, which was missing in the previous
+  release and resulted in adding python as a build dependency. The release
+  tarball of 3.5.1 does not require python. 
+
+Finished 30 Jan 2017
+
+Version 3.5:
+
+- ui:
+  * "chat list": shows a list of existing server-side chatrooms. With some
+    protocols, this is often the only way to add new channels.
+    See 'help chat list' for details. (jgeboski)
+  * "plugins": lists the installed plugins and their versions (jgeboski)
+  * Add 'nick_lowercase' and 'nick_underscores' settings.
+  * "handle_unknown" can be set per-account, not just globally
+
+- jabber:
+  * Add "always_use_nicks" channel setting, for non-anonymous MUCs (trac #415)
+    See 'help set always_use_nicks' for possible side effects.
+  * Properly handle rejected file transfers
+  * Don't send parts in a chat if someone is still connected from other devices
+  * hipchat: support personal oauth tokens (manually generated ones)
+
+- twitter:
+  * Hide muted tweets / no-retweets, add mute/unmute commands (Flexo)
+  * Show full version of extended tweets (with slightly more than 140 chars)
+
+- purple:
+  * Support setting chat room topics (EionRobb)
+  * Support for extra groupchat settings. Shows an error if any required
+    ones are missing. Look for purple_ prefixed settings in "chan #... set"
+  * SIPE: persistent chats can be joined now, thanks to the "chat list" command
+    and the above ("purple_uri" channel setting)
+  * Fix a file transfer crash bug (Mainly affected telegram)
+  * Honor protocol flag to not require a password (used in hangouts, telegram)
+  * Set the contacts' nicks to the %full_name for a few whitelisted protocols
+    (hangouts, funyahoo, icq, line)
+  * LINE: added a hack to save its auth token, to avoid re-auth every time
+  * Show self-messages in groupchat backlogs (before join)
+
+- yahoo:
+  * Removed because they killed their old protocol on a two month notice.
+    Use EionRobb's funyahoo purple plugin, or better yet, don't use yahoo.
+
+- Stuff for enterprise deployments (all done by Sevas)
+  * Locked down accounts, useful when pregenerating user config files. An
+    account that is marked with the locked="true" attribute can't be removed
+    and its username/password can't be changed.
+  * Locked down settings. Same as above, but for individual account settings.
+  * AllowAccountAdd setting in bitlbee.conf, to disable adding new accounts.
+  * PAM and LDAP authentication backends (not compiled by default)
+
+- For packagers:
+  * Enabled debug symbols in non-debug builds, disabled stripping by default.
+    This is closer to the default behavior of autotools, and --debug=1 is mostly
+    to set the DEBUG macro and disable optimization.
+
+- For plugin devs:
+  * Plugins should now include an "init_plugin_info" function which will be used
+    for ABI version checking in the future. It's optional for now, but will be
+    enforced later. See the commit log of d28fe1c for details. (jgeboski)
+
+Finished 8 Jan 2017
+
+Version 3.4.2:
+- irc:
+  * Self-messages (messages sent by yourself from other IM clients), given
+    support by the IM protocols and your IRC client. See this for details:
+    https://wiki.bitlbee.org/SelfMessages
+  * IRCv3.1 support and part of 3.2: cap-3.2, sasl-3.2, multi-prefix,
+    away-notify, extended-join, userhost-in-names
+  * Send numeric errors when failing to join a channel, to not confuse clients
+  * Channel autojoins should be more reliable now.
+- jabber:
+  * Carbons (XEP-0280), for self-message support. It's not widely supported
+    by most public XMPP servers (easier if you host your own), but this will
+    probably change in the next few years. Thanks kormat for the original patch.
+  * Fix typing notifications between two bitlbee users or with gtalk users
+  * Remove facebook XMPP code, point people at bitlbee-facebook.
+  * Show groupchat kick/ban/leave reasons
+  * SASL ANONYMOUS (XEP-0175), for "guest" logins, see "help set anonymous"
+  * Hipchat: 'chat add hipchat "channel name"' now tries to guess the JID
+- purple:
+  * Fix problems remembering SSL certificates as trusted
+  * Fix /join #channel, which joined a differently named channel
+  * Fix crash when doing "chat with" with skypeweb
+  * Fix html entities appearing in some protocols
+  * Fix setting away states in jabber, which failed silently
+  * Implement notify_message UI op, to be able to show some error messages.
+- skype:
+  * Show all messages as groupchats since we can't tell which ones are private.
+  * This plugin is mostly-deprecated and mostly-broken but it's still useful
+    for p2p-based groupchats, which aren't delivered over newer protocols.
+    Everyone else should use the skypeweb purple plugin or msn instead.
+- msn:
+  * Minor tweaks. Faster login, better error reporting, fixed add/remove.
+    Still MSNP21. Disregard that "Next release!" in the previous release.
+- otr:
+  * Don't use NOTICE for user messages (revmischa)
+  * Fix crashes when using the jabber xmlconsole
+  * A few minor fixes: color multiline messages, filter incoming color codes.
+- Packaging:
+  * Show ./configure args in bitlbee -V, config.h and Makefile.settings
+  * Allow setting the plugin dir in bitlbee.conf, for NixOS (anderspapitto)
+  * Improved cross compiler support (gamaral)
+- Other important bugfixes:
+  * Fix potential crashes when leaving temporary channels
+  * Fix all sorts of crashing bugs when cancelling in-progress connections.
+
+Finished 19 Mar 2016
+
 Version 3.4.1:
 - msn:
   * Upgraded protocol to MSNP21, works again (dx)

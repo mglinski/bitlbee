@@ -52,7 +52,7 @@ struct http_request *twitter_http(struct im_connection *ic, char *url_string, ht
 	struct twitter_data *td = ic->proto_data;
 	char *tmp;
 	GString *request = g_string_new("");
-	void *ret;
+	void *ret = NULL;
 	char *url_arguments;
 	url_t *base_url = NULL;
 
@@ -71,15 +71,14 @@ struct http_request *twitter_http(struct im_connection *ic, char *url_string, ht
 	if (strstr(url_string, "://")) {
 		base_url = g_new0(url_t, 1);
 		if (!url_set(base_url, url_string)) {
-			g_free(base_url);
-			return NULL;
+			goto error;
 		}
 	}
 
 	// Make the request.
 	g_string_printf(request, "%s %s%s%s%s HTTP/1.1\r\n"
 	                "Host: %s\r\n"
-	                "User-Agent: BitlBee " BITLBEE_VERSION " " ARCH "/" CPU "\r\n",
+	                "User-Agent: BitlBee " BITLBEE_VERSION "\r\n",
 	                is_post ? "POST" : "GET",
 	                base_url ? base_url->file : td->url_path,
 	                base_url ? "" : url_string,
@@ -131,6 +130,7 @@ struct http_request *twitter_http(struct im_connection *ic, char *url_string, ht
 		ret = http_dorequest(td->url_host, td->url_port, td->url_ssl, request->str, func, data);
 	}
 
+error:
 	g_free(url_arguments);
 	g_string_free(request, TRUE);
 	g_free(base_url);

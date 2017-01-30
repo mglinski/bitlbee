@@ -95,6 +95,7 @@ struct im_connection {
 	bee_t *bee;
 
 	GSList *groupchats;
+	GSList *chatlist;
 };
 
 struct groupchat {
@@ -137,6 +138,27 @@ struct buddy_action {
 	char *name;
 	char *description;
 };
+
+/* This enum takes a few things from libpurple and a few things from old OPT_ flags.
+ * The only flag that was used before this struct was PRPL_OPT_NOOTR.
+ *
+ * The libpurple ones only use the same values as the PurpleProtocolOptions
+ * enum for convenience, but there's no promise of direct compatibility with
+ * those values. As of libpurple 2.8.0 they use up to 0x800 (1 << 11), which is
+ * a nice coincidence.
+ */
+typedef enum {
+	/* The protocol doesn't use passwords
+	 * Mirrors libpurple's OPT_PROTO_NO_PASSWORD */
+	PRPL_OPT_NO_PASSWORD = 1 << 4,
+
+	/* The protocol doesn't require passwords, but may use them
+	 * Mirrors libpurple's OPT_PROTO_PASSWORD_OPTIONAL */
+	PRPL_OPT_PASSWORD_OPTIONAL = 1 << 7,
+
+	/* The protocol is not suitable for OTR, see OPT_NOOTR */
+	PRPL_OPT_NOOTR = 1 << 12,
+} prpl_options_t;
 
 struct prpl {
 	int options;
@@ -262,6 +284,13 @@ struct prpl {
 	/* If null, equivalent to handle_cmp( ic->acc->user, who ) */
 	gboolean (* handle_is_self) (struct im_connection *, const char *who);
 
+	/* This sets/updates the im_connection->chatlist field with a
+	 * bee_chat_info_t GSList. This function should ensure the
+	 * bee_chat_list_finish() function gets called at some point
+	 * after the chat list is completely updated.
+	 */
+	void (* chat_list) (struct im_connection *, const char *server);
+
 	/* Some placeholders so eventually older plugins may cooperate with newer BitlBees. */
 	void *resv1;
 	void *resv2;
@@ -270,10 +299,28 @@ struct prpl {
 	void *resv5;
 };
 
+struct plugin_info
+{
+	guint abiver;
+	const char *name;
+	const char *version;
+	const char *description;
+	const char *author;
+	const char *url;
+};
+
+#ifdef WITH_PLUGINS
+G_MODULE_EXPORT GList *get_plugins();
+#endif
+
 /* im_api core stuff. */
 void nogaim_init();
+G_MODULE_EXPORT GList *get_protocols();
+G_MODULE_EXPORT GList *get_protocols_disabled();
 G_MODULE_EXPORT GSList *get_connections();
 G_MODULE_EXPORT struct prpl *find_protocol(const char *name);
+G_MODULE_EXPORT gboolean is_protocol_disabled(const char *name);
+G_MODULE_EXPORT char *explain_unknown_protocol(const char *name);
 /* When registering a new protocol, you should allocate space for a new prpl
  * struct, initialize it (set the function pointers to point to your
  * functions), finally call this function. */
@@ -320,14 +367,15 @@ G_MODULE_EXPORT void imcb_ask_add(struct im_connection *ic, const char *handle, 
  * server confirms that the add was successful. Don't forget to do this! */
 G_MODULE_EXPORT void imcb_add_buddy(struct im_connection *ic, const char *handle, const char *group);
 G_MODULE_EXPORT void imcb_remove_buddy(struct im_connection *ic, const char *handle, char *group);
-G_MODULE_EXPORT struct buddy *imcb_find_buddy(struct im_connection *ic, char *handle);
 G_MODULE_EXPORT void imcb_rename_buddy(struct im_connection *ic, const char *handle, const char *realname);
 G_MODULE_EXPORT void imcb_buddy_nick_hint(struct im_connection *ic, const char *handle, const char *nick);
+G_MODULE_EXPORT void imcb_buddy_nick_change(struct im_connection *ic, const char *handle, const char *nick);
 G_MODULE_EXPORT void imcb_buddy_action_response(bee_user_t *bu, const char *action, char * const args[], void *data);
 
 G_MODULE_EXPORT void imcb_buddy_typing(struct im_connection *ic, const char *handle, guint32 flags);
 G_MODULE_EXPORT struct bee_user *imcb_buddy_by_handle(struct im_connection *ic, const char *handle);
-G_MODULE_EXPORT void imcb_clean_handle(struct im_connection *ic, char *handle);
+
+G_GNUC_DEPRECATED G_MODULE_EXPORT void imcb_clean_handle(struct im_connection *ic, char *handle);
 
 /* Actions, or whatever. */
 int imc_away_send_update(struct im_connection *ic);

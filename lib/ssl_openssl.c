@@ -66,8 +66,9 @@ void ssl_init(void)
 
 	SSL_library_init();
 
-	meth = TLSv1_client_method();
+	meth = SSLv23_client_method();
 	ssl_ctx = SSL_CTX_new(meth);
+	SSL_CTX_set_options(ssl_ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3);
 
 	initialized = TRUE;
 }
@@ -130,7 +131,7 @@ static gboolean ssl_connected(gpointer data, gint source, b_input_condition cond
 		/* Right now we don't have any verification functionality for OpenSSL. */
 		conn->func(conn->data, 1, NULL, cond);
 		if (source >= 0) {
-			closesocket(source);
+			proxy_disconnect(source);
 		}
 		ssl_conn_free(conn);
 
@@ -275,7 +276,7 @@ void ssl_disconnect(void *conn_)
 		SSL_shutdown(conn->ssl);
 	}
 
-	closesocket(conn->fd);
+	proxy_disconnect(conn->fd);
 
 	ssl_conn_free(conn);
 }

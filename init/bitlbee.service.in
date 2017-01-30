@@ -1,9 +1,9 @@
 [Unit]
 Description=BitlBee IRC/IM gateway
-After=syslog.target
 
 [Service]
 ExecStart=@sbindir@bitlbee -F -n
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target

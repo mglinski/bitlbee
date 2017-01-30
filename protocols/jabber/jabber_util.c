@@ -314,6 +314,10 @@ int jabber_compare_jid(const char *jid1, const char *jid2)
 {
 	int i;
 
+	if (!jid1 || !jid2) {
+		return FALSE;
+	}
+
 	for (i = 0;; i++) {
 		if (jid1[i] == '\0' || jid1[i] == '/' || jid2[i] == '\0' || jid2[i] == '/') {
 			if ((jid1[i] == '\0' || jid1[i] == '/') && (jid2[i] == '\0' || jid2[i] == '/')) {
@@ -513,7 +517,11 @@ struct jabber_buddy *jabber_buddy_by_jid(struct im_connection *ic, char *jid_, g
 			       jabber_buddy_add(ic, jid_) : NULL;
 		} else if (bud->resource && (flags & GET_BUDDY_EXACT)) {
 			/* We want an exact match, so in thise case there shouldn't be a /resource. */
-			return NULL;
+			if (head != bud && head->resource == NULL) {
+				return head;
+			} else {
+				return NULL;
+			}
 		} else if (bud->resource == NULL || bud->next == NULL) {
 			/* No need for selection if there's only one option. */
 			return bud;

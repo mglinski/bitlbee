@@ -40,7 +40,7 @@ static char *adlrml_entry(const char *handle_, msn_buddy_flags_t list)
 		return NULL;
 	}
 
-	return g_markup_printf_escaped("<ml><d n=\"%s\"><c n=\"%s\" l=\"%d\" t=\"1\"/></d></ml>",
+	return g_markup_printf_escaped("<ml><d n=\"%s\"><c n=\"%s\" t=\"1\"><s n=\"IM\" l=\"%d\" /></c></d></ml>",
 	                               domain, handle, list);
 }
 
@@ -179,7 +179,7 @@ void msn_queue_feed(struct msn_data *h, char *bytes, int st)
 
 	if (getenv("BITLBEE_DEBUG")) {
 		fprintf(stderr, "\n\x1b[92m<<< ");
-		write(2, bytes , st);
+		fwrite(bytes, st, 1, stderr);
 		fprintf(stderr, "\x1b[97m");
 	}
 }

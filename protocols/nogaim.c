@@ -39,24 +39,102 @@
 GSList *connections;
 
 #ifdef WITH_PLUGINS
+GList *plugins = NULL;
+
+static gint pluginscmp(gconstpointer a, gconstpointer b, gpointer data)
+{
+	const struct plugin_info *ia = a;
+	const struct plugin_info *ib = b;
+
+	return g_strcasecmp(ia->name, ib->name);
+}
+
+/* semi-private */
+gboolean plugin_info_validate(struct plugin_info *info, const char *path)
+{
+	GList *l;
+	gboolean loaded = FALSE;
+
+	if (!path) {
+		path = "(null)";
+	}
+
+	if (info->abiver != BITLBEE_ABI_VERSION_CODE) {
+		log_message(LOGLVL_ERROR,
+			    "`%s' uses ABI %u but %u is required\n",
+			    path, info->abiver,
+			    BITLBEE_ABI_VERSION_CODE);
+		return FALSE;
+	}
+
+	if (!info->name || !info->version) {
+		log_message(LOGLVL_ERROR,
+			    "Name or version missing from the "
+			    "plugin info in `%s'\n", path);
+		return FALSE;
+	}
+
+	for (l = plugins; l; l = l->next) {
+		struct plugin_info *i = l->data;
+
+		if (g_strcasecmp(i->name, info->name) == 0) {
+			loaded = TRUE;
+			break;
+		}
+	}
+
+	if (loaded) {
+		log_message(LOGLVL_WARNING,
+			    "%s plugin already loaded\n",
+			    info->name);
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
+/* semi-private */
+gboolean plugin_info_add(struct plugin_info *info)
+{
+	plugins = g_list_insert_sorted_with_data(plugins, info, pluginscmp, NULL);
+	return TRUE;
+}
+
 gboolean load_plugin(char *path)
 {
+	struct plugin_info *info = NULL;
+	struct plugin_info * (*info_function) (void) = NULL;
 	void (*init_function) (void);
 
 	GModule *mod = g_module_open(path, G_MODULE_BIND_LAZY);
 
 	if (!mod) {
-		log_message(LOGLVL_ERROR, "Can't find `%s', not loading (%s)\n", path, g_module_error());
+		log_message(LOGLVL_ERROR, "Error loading plugin `%s': %s\n", path, g_module_error());
 		return FALSE;
+	}
+
+	if (g_module_symbol(mod, "init_plugin_info", (gpointer *) &info_function)) {
+		info = info_function();
+
+		if (!plugin_info_validate(info, path)) {
+			g_module_close(mod);
+			return FALSE;
+		}
+	} else {
+		log_message(LOGLVL_WARNING, "Can't find function `init_plugin_info' in `%s'\n", path);
 	}
 
 	if (!g_module_symbol(mod, "init_plugin", (gpointer *) &init_function)) {
 		log_message(LOGLVL_WARNING, "Can't find function `init_plugin' in `%s'\n", path);
+		g_module_close(mod);
 		return FALSE;
 	}
 
-	init_function();
+	if (info_function) {
+		plugin_info_add(info);
+	}
 
+	init_function();
 	return TRUE;
 }
 
@@ -72,6 +150,10 @@ void load_plugins(void)
 		char *path;
 
 		while ((entry = g_dir_read_name(dir))) {
+			if (!g_str_has_suffix(entry, "." G_MODULE_SUFFIX)) {
+				continue;
+			}
+
 			path = g_build_filename(global.conf->plugindir, entry, NULL);
 			if (!path) {
 				log_message(LOGLVL_WARNING, "Can't build path for %s\n", entry);
@@ -86,9 +168,15 @@ void load_plugins(void)
 		g_dir_close(dir);
 	}
 }
+
+GList *get_plugins()
+{
+	return plugins;
+}
 #endif
 
 GList *protocols = NULL;
+GList *disabled_protocols = NULL;
 
 void register_protocol(struct prpl *p)
 {
@@ -102,32 +190,71 @@ void register_protocol(struct prpl *p)
 	}
 
 	if (refused) {
-		log_message(LOGLVL_WARNING, "Protocol %s disabled\n", p->name);
+		disabled_protocols = g_list_append(disabled_protocols, p);
 	} else {
 		protocols = g_list_append(protocols, p);
 	}
 }
 
+static int proto_name_cmp(const void *proto_, const void *name)
+{
+	const struct prpl *proto = proto_;
+	return g_strcasecmp(proto->name, name);
+}
+
 struct prpl *find_protocol(const char *name)
 {
-	GList *gl;
+	GList *gl = g_list_find_custom(protocols, name, proto_name_cmp);
+	return gl ? gl->data: NULL;
+}
 
-	for (gl = protocols; gl; gl = gl->next) {
-		struct prpl *proto = gl->data;
+gboolean is_protocol_disabled(const char *name)
+{
+	return g_list_find_custom(disabled_protocols, name, proto_name_cmp) != NULL;
+}
 
-		if (g_strcasecmp(proto->name, name) == 0) {
-			return proto;
-		}
+/* Returns heap allocated string with text attempting to explain why a protocol is missing 
+ * Free the return value with g_free() */
+char *explain_unknown_protocol(const char *name)
+{
+	char *extramsg = NULL;
+
+	if (is_protocol_disabled(name)) {
+		return g_strdup("Protocol disabled in the global config (bitlbee.conf)");
 	}
 
-	return NULL;
+	if (strcmp(name, "yahoo") == 0) {
+		return g_strdup("The old yahoo protocol is gone, try the funyahoo++ libpurple plugin instead.");
+	}
+
+#ifdef WITH_PURPLE
+	if ((strcmp(name, "msn") == 0) ||
+	    (strcmp(name, "loubserp-mxit") == 0) ||
+	    (strcmp(name, "myspace") == 0)) {
+		return g_strdup("This protocol has been removed from your libpurple version.");
+	}
+
+	if (strcmp(name, "hipchat") == 0) {
+		return g_strdup("This account type isn't supported by libpurple's jabber.");
+	}
+
+#else
+	if (strcmp(name, "aim") == 0 || strcmp(name, "icq") == 0) {
+		return g_strdup("This account uses libpurple specific aliases for oscar. "
+		                "Re-add the account with `account add oscar ...'");
+	}
+
+	extramsg = "If this is a libpurple plugin, you might need to install bitlbee-libpurple instead.";
+#endif
+	return g_strconcat("The protocol plugin is not installed or could not be loaded. "
+	                   "Use the `plugins' command to list available protocols. ",
+	                   extramsg, NULL);
 }
 
 void nogaim_init()
 {
 	extern void msn_initmodule();
 	extern void oscar_initmodule();
-	extern void byahoo_initmodule();
 	extern void jabber_initmodule();
 	extern void twitter_initmodule();
 	extern void purple_initmodule();
@@ -138,10 +265,6 @@ void nogaim_init()
 
 #ifdef WITH_OSCAR
 	oscar_initmodule();
-#endif
-
-#ifdef WITH_YAHOO
-	byahoo_initmodule();
 #endif
 
 #ifdef WITH_JABBER
@@ -159,6 +282,16 @@ void nogaim_init()
 #ifdef WITH_PLUGINS
 	load_plugins();
 #endif
+}
+
+GList *get_protocols()
+{
+	return protocols;
+}
+
+GList *get_protocols_disabled()
+{
+	return disabled_protocols;
 }
 
 GSList *get_connections()
@@ -203,6 +336,10 @@ static void serv_got_crap(struct im_connection *ic, char *format, ...)
 	char *text;
 	account_t *a;
 
+	if (!ic->bee->ui->log) {
+		return;
+	}
+
 	va_start(params, format);
 	text = g_strdup_vprintf(format, params);
 	va_end(params);
@@ -221,10 +358,9 @@ static void serv_got_crap(struct im_connection *ic, char *format, ...)
 
 	/* If we found one, include the screenname in the message. */
 	if (a) {
-		/* FIXME(wilmer): ui_log callback or so */
-		irc_rootmsg(ic->bee->ui_data, "%s - %s", ic->acc->tag, text);
+		ic->bee->ui->log(ic->bee, ic->acc->tag, text);
 	} else {
-		irc_rootmsg(ic->bee->ui_data, "%s - %s", ic->acc->prpl->name, text);
+		ic->bee->ui->log(ic->bee, ic->acc->prpl->name, text);
 	}
 
 	g_free(text);
@@ -472,9 +608,8 @@ void imcb_remove_buddy(struct im_connection *ic, const char *handle, char *group
 	bee_user_free(ic->bee, bee_user_by_handle(ic->bee, ic, handle));
 }
 
-/* Mainly meant for ICQ (and now also for Jabber conferences) to allow IM
-   modules to suggest a nickname for a handle. */
-void imcb_buddy_nick_hint(struct im_connection *ic, const char *handle, const char *nick)
+/* Implements either imcb_buddy_nick_hint() or imcb_buddy_nick_change() depending on the value of 'change' */
+static void buddy_nick_hint_or_change(struct im_connection *ic, const char *handle, const char *nick, gboolean change)
 {
 	bee_t *bee = ic->bee;
 	bee_user_t *bu = bee_user_by_handle(bee, ic, handle);
@@ -486,11 +621,24 @@ void imcb_buddy_nick_hint(struct im_connection *ic, const char *handle, const ch
 	g_free(bu->nick);
 	bu->nick = g_strdup(nick);
 
-	if (bee->ui->user_nick_hint) {
+	if (change && bee->ui->user_nick_change) {
+		bee->ui->user_nick_change(bee, bu, nick);
+	} else if (!change && bee->ui->user_nick_hint) {
 		bee->ui->user_nick_hint(bee, bu, nick);
 	}
 }
 
+/* Soft variant, for newly created users. Does nothing if it's already online */
+void imcb_buddy_nick_hint(struct im_connection *ic, const char *handle, const char *nick)
+{
+	buddy_nick_hint_or_change(ic, handle, nick, FALSE);
+}
+
+/* Hard variant, always changes the nick */
+void imcb_buddy_nick_change(struct im_connection *ic, const char *handle, const char *nick)
+{
+	buddy_nick_hint_or_change(ic, handle, nick, TRUE);
+}
 
 struct imcb_ask_cb_data {
 	struct im_connection *ic;
@@ -614,8 +762,12 @@ int imc_away_send_update(struct im_connection *ic)
 	       : set_getstr(&ic->bee->set, "away");
 	if (away && *away) {
 		GList *m = ic->acc->prpl->away_states(ic);
+		if (m == NULL) {
+			return 0;
+		}
 		msg = ic->acc->flags & ACC_FLAG_AWAY_MESSAGE ? away : NULL;
-		away = imc_away_state_find(m, away, &msg) ? : m->data;
+		away = imc_away_state_find(m, away, &msg) ? :
+		       (imc_away_state_find(m, "away", &msg) ? : m->data);
 	} else if (ic->acc->flags & ACC_FLAG_STATUS_MESSAGE) {
 		away = NULL;
 		msg = set_getstr(&ic->acc->set, "status") ?
@@ -734,32 +886,8 @@ void imc_rem_block(struct im_connection *ic, char *handle)
 	ic->acc->prpl->rem_deny(ic, handle);
 }
 
+/* Deprecated: using this function resulted in merging several handles accidentally
+ * Also the irc layer handles this decently nowadays */
 void imcb_clean_handle(struct im_connection *ic, char *handle)
 {
-	/* Accepts a handle and does whatever is necessary to make it
-	   BitlBee-friendly. Currently this means removing everything
-	   outside 33-127 (ASCII printable excl spaces), @ (only one
-	   is allowed) and ! and : */
-	char out[strlen(handle) + 1];
-	int s, d;
-
-	s = d = 0;
-	while (handle[s]) {
-		if (handle[s] > ' ' && handle[s] != '!' && handle[s] != ':' &&
-		    (handle[s] & 0x80) == 0) {
-			if (handle[s] == '@') {
-				/* See if we got an @ already? */
-				out[d] = 0;
-				if (strchr(out, '@')) {
-					continue;
-				}
-			}
-
-			out[d++] = handle[s];
-		}
-		s++;
-	}
-	out[d] = handle[s];
-
-	strcpy(handle, out);
 }

@@ -233,12 +233,14 @@ static json_value *twitter_parse_response(struct im_connection *ic, struct http_
 
 	if ((ret = json_parse(req->reply_body, req->body_size)) == NULL) {
 		imcb_error(ic, "Could not retrieve %s: %s",
-		           path, "XML parse error");
+		           path, "JSON parse error");
 	}
 	return ret;
 }
 
 static void twitter_http_get_friends_ids(struct http_request *req);
+static void twitter_http_get_mutes_ids(struct http_request *req);
+static void twitter_http_get_noretweets_ids(struct http_request *req);
 
 /**
  * Get the friends ids.
@@ -251,6 +253,34 @@ void twitter_get_friends_ids(struct im_connection *ic, gint64 next_cursor)
 	args[0] = "cursor";
 	args[1] = g_strdup_printf("%" G_GINT64_FORMAT, next_cursor);
 	twitter_http(ic, TWITTER_FRIENDS_IDS_URL, twitter_http_get_friends_ids, ic, 0, args, 2);
+
+	g_free(args[1]);
+}
+
+/**
+ * Get the muted users ids.
+ */
+void twitter_get_mutes_ids(struct im_connection *ic, gint64 next_cursor)
+{
+	char *args[2];
+
+	args[0] = "cursor";
+	args[1] = g_strdup_printf("%" G_GINT64_FORMAT, next_cursor);
+	twitter_http(ic, TWITTER_MUTES_IDS_URL, twitter_http_get_mutes_ids, ic, 0, args, 2);
+
+	g_free(args[1]);
+}
+
+/**
+ * Get the ids for users from whom we should ignore retweets.
+ */
+void twitter_get_noretweets_ids(struct im_connection *ic, gint64 next_cursor)
+{
+	char *args[2];
+
+	args[0] = "cursor";
+	args[1] = g_strdup_printf("%" G_GINT64_FORMAT, next_cursor);
+	twitter_http(ic, TWITTER_NORETWEETS_IDS_URL, twitter_http_get_noretweets_ids, ic, 0, args, 2);
 
 	g_free(args[1]);
 }
@@ -311,13 +341,13 @@ static void twitter_http_get_friends_ids(struct http_request *req)
 
 	td = ic->proto_data;
 
-	txl = g_new0(struct twitter_xml_list, 1);
-	txl->list = td->follow_ids;
-
 	// Parse the data.
 	if (!(parsed = twitter_parse_response(ic, req))) {
 		return;
 	}
+
+	txl = g_new0(struct twitter_xml_list, 1);
+	txl->list = td->follow_ids;
 
 	twitter_xt_get_friends_id_list(parsed, txl);
 	json_value_free(parsed);
@@ -331,6 +361,102 @@ static void twitter_http_get_friends_ids(struct http_request *req)
 		/* Now to convert all those numbers into names.. */
 		twitter_get_users_lookup(ic);
 	}
+
+	txl->list = NULL;
+	txl_free(txl);
+}
+
+/**
+ * Callback for getting the mutes ids.
+ */
+static void twitter_http_get_mutes_ids(struct http_request *req)
+{
+	struct im_connection *ic = req->data;
+	json_value *parsed;
+	struct twitter_xml_list *txl;
+	struct twitter_data *td;
+
+	// Check if the connection is stil active
+	if (!g_slist_find(twitter_connections, ic)) {
+		return;
+	}
+
+	td = ic->proto_data;
+
+	if (req->status_code != 200) {
+		/* Fail silently */
+		return;
+	}
+
+	// Parse the data.
+	if (!(parsed = twitter_parse_response(ic, req))) {
+		return;
+	}
+
+	txl = g_new0(struct twitter_xml_list, 1);
+	txl->list = td->mutes_ids;
+
+	/* mute ids API response is similar enough to friends response
+	   to reuse this method */
+	twitter_xt_get_friends_id_list(parsed, txl);
+	json_value_free(parsed);
+
+	td->mutes_ids = txl->list;
+	if (txl->next_cursor) {
+		/* Recurse while there are still more pages */
+		twitter_get_mutes_ids(ic, txl->next_cursor);
+	}
+
+	txl->list = NULL;
+	txl_free(txl);
+}
+
+/**
+ * Callback for getting the no-retweets ids.
+ */
+static void twitter_http_get_noretweets_ids(struct http_request *req)
+{
+	struct im_connection *ic = req->data;
+	json_value *parsed;
+	struct twitter_xml_list *txl;
+	struct twitter_data *td;
+
+	// Check if the connection is stil active
+	if (!g_slist_find(twitter_connections, ic)) {
+		return;
+	}
+
+	if (req->status_code != 200) {
+		/* Fail silently */
+		return;
+	}
+
+	td = ic->proto_data;
+
+	// Parse the data.
+	if (!(parsed = twitter_parse_response(ic, req))) {
+		return;
+	}
+
+	txl = g_new0(struct twitter_xml_list, 1);
+	txl->list = td->noretweets_ids;
+	
+	// Process the retweet ids
+	txl->type = TXL_ID;
+	if (parsed->type == json_array) {
+		unsigned int i;
+		for (i = 0; i < parsed->u.array.length; i++) {
+			json_value *c = parsed->u.array.values[i];
+			if (c->type != json_integer) {
+				continue;
+			}
+			txl->list = g_slist_prepend(txl->list,
+			                            g_strdup_printf("%"PRIu64, c->u.integer));
+		}
+	}
+
+	json_value_free(parsed);
+	td->noretweets_ids = txl->list;
 
 	txl->list = NULL;
 	txl_free(txl);
@@ -387,13 +513,14 @@ static void twitter_http_get_users_lookup(struct http_request *req)
 		return;
 	}
 
-	txl = g_new0(struct twitter_xml_list, 1);
-	txl->list = NULL;
-
 	// Get the user list from the parsed xml feed.
 	if (!(parsed = twitter_parse_response(ic, req))) {
 		return;
 	}
+
+	txl = g_new0(struct twitter_xml_list, 1);
+	txl->list = NULL;
+
 	twitter_xt_get_users(parsed, txl);
 	json_value_free(parsed);
 
@@ -459,7 +586,7 @@ static gboolean twitter_xt_get_users(json_value *node, struct twitter_xml_list *
 #define TWITTER_TIME_FORMAT "%a %b %d %H:%M:%S +0000 %Y"
 #endif
 
-static void expand_entities(char **text, const json_value *node);
+static void expand_entities(char **text, const json_value *node, const json_value *extended_node);
 
 /**
  * Function to fill a twitter_xml_status struct.
@@ -471,8 +598,10 @@ static void expand_entities(char **text, const json_value *node);
  */
 static struct twitter_xml_status *twitter_xt_get_status(const json_value *node)
 {
-	struct twitter_xml_status *txs;
+	struct twitter_xml_status *txs = {0};
 	const json_value *rt = NULL;
+	const json_value *text_value = NULL;
+	const json_value *extended_node = NULL;
 
 	if (node->type != json_object) {
 		return FALSE;
@@ -480,9 +609,13 @@ static struct twitter_xml_status *twitter_xt_get_status(const json_value *node)
 	txs = g_new0(struct twitter_xml_status, 1);
 
 	JSON_O_FOREACH(node, k, v) {
-		if (strcmp("text", k) == 0 && v->type == json_string) {
-			txs->text = g_memdup(v->u.string.ptr, v->u.string.length + 1);
-			strip_html(txs->text);
+		if (strcmp("text", k) == 0 && v->type == json_string && text_value == NULL) {
+			text_value = v;
+		} else if (strcmp("full_text", k) == 0 && v->type == json_string) {
+			text_value = v;
+		} else if (strcmp("extended_tweet", k) == 0 && v->type == json_object) {
+			text_value = json_o_get(v, "full_text");
+			extended_node = v;
 		} else if (strcmp("retweeted_status", k) == 0 && v->type == json_object) {
 			rt = v;
 		} else if (strcmp("created_at", k) == 0 && v->type == json_string) {
@@ -508,13 +641,14 @@ static struct twitter_xml_status *twitter_xt_get_status(const json_value *node)
 	if (rt) {
 		struct twitter_xml_status *rtxs = twitter_xt_get_status(rt);
 		if (rtxs) {
-			g_free(txs->text);
 			txs->text = g_strdup_printf("RT @%s: %s", rtxs->user->screen_name, rtxs->text);
 			txs->id = rtxs->id;
 			txs_free(rtxs);
 		}
-	} else {
-		expand_entities(&txs->text, node);
+	} else if (text_value && text_value->type == json_string) {
+		txs->text = g_memdup(text_value->u.string.ptr, text_value->u.string.length + 1);
+		strip_html(txs->text);
+		expand_entities(&txs->text, node, extended_node);
 	}
 
 	if (txs->text && txs->user && txs->id) {
@@ -557,7 +691,7 @@ static struct twitter_xml_status *twitter_xt_get_dm(const json_value *node)
 		}
 	}
 
-	expand_entities(&txs->text, node);
+	expand_entities(&txs->text, node, NULL);
 
 	if (txs->text && txs->user && txs->id) {
 		return txs;
@@ -567,16 +701,15 @@ static struct twitter_xml_status *twitter_xt_get_dm(const json_value *node)
 	return NULL;
 }
 
-static void expand_entities(char **text, const json_value *node)
+static void expand_entities(char **text, const json_value *node, const json_value *extended_node)
 {
-	json_value *entities, *quoted;
+	json_value *entities, *extended_entities, *quoted;
 	char *quote_url = NULL, *quote_text = NULL;
 
 	if (!((entities = json_o_get(node, "entities")) && entities->type == json_object))
 		return;
 	if ((quoted = json_o_get(node, "quoted_status")) && quoted->type == json_object) {
-		/* New "retweets with comments" feature. Note that this info
-		 * seems to be included in the streaming API only! Grab the
+		/* New "retweets with comments" feature. Grab the
 		 * full message and try to insert it when we run into the
 		 * Tweet entity. */
 		struct twitter_xml_status *txs = twitter_xt_get_status(quoted);
@@ -585,6 +718,13 @@ static void expand_entities(char **text, const json_value *node)
 		txs_free(txs);
 	} else {
 		quoted = NULL;
+	}
+
+	if (extended_node) {
+		extended_entities = json_o_get(extended_node, "entities");
+		if (extended_entities && extended_entities->type == json_object) {
+			entities = extended_entities;
+		}
 	}
 
 	JSON_O_FOREACH(entities, k, v) {
@@ -609,7 +749,10 @@ static void expand_entities(char **text, const json_value *node)
 			const char *full = json_o_str(v->u.array.values[i], "expanded_url");
 			char *pos, *new;
 
-			if (!kort || !disp || !(pos = strstr(*text, kort))) {
+			/* Skip if a required field is missing, if the t.co URL is not in fact 
+			   in the Tweet at all, or if the full-ish one *is* in it already
+			   (dupes appear, especially in streaming API). */
+			if (!kort || !disp || !(pos = strstr(*text, kort)) || strstr(*text, disp)) {
 				continue;
 			}
 			if (quote_url && strstr(full, quote_url)) {
@@ -829,8 +972,21 @@ static void twitter_status_show(struct im_connection *ic, struct twitter_xml_sta
 {
 	struct twitter_data *td = ic->proto_data;
 	char *last_id_str;
+	char *uid_str;
 
 	if (status->user == NULL || status->text == NULL) {
+		return;
+	}
+	
+	/* Check this is not a tweet that should be muted */
+	uid_str = g_strdup_printf("%" PRIu64, status->user->uid);
+
+	if (g_slist_find_custom(td->mutes_ids, uid_str, (GCompareFunc)strcmp)) {
+		g_free(uid_str);
+		return;
+	}
+	if (status->id != status->rt_id && g_slist_find_custom(td->noretweets_ids, uid_str, (GCompareFunc)strcmp)) {
+		g_free(uid_str);
 		return;
 	}
 
@@ -855,6 +1011,7 @@ static void twitter_status_show(struct im_connection *ic, struct twitter_xml_sta
 	last_id_str = g_strdup_printf("%" G_GUINT64_FORMAT, td->timeline_id);
 	set_setstr(&ic->acc->set, "_last_tweet", last_id_str);
 	g_free(last_id_str);
+	g_free(uid_str);
 }
 
 static gboolean twitter_stream_handle_object(struct im_connection *ic, json_value *o, gboolean from_filter);
@@ -872,7 +1029,6 @@ static void twitter_http_stream(struct http_request *req)
 		return;
 	}
 
-	ic->flags |= OPT_PONGED;
 	td = ic->proto_data;
 
 	if ((req->flags & HTTPC_EOF) || !req->reply_body) {
@@ -888,6 +1044,10 @@ static void twitter_http_stream(struct http_request *req)
 		}
 		imc_logout(ic, TRUE);
 		return;
+	}
+
+	if (req == td->stream) {
+		ic->flags |= OPT_PONGED;
 	}
 
 	/* MUST search for CRLF, not just LF:
@@ -991,6 +1151,8 @@ static gboolean twitter_stream_handle_event(struct im_connection *ic, json_value
 	json_value *source = json_o_get(o, "source");
 	json_value *target = json_o_get(o, "target");
 	const char *type = json_o_str(o, "event");
+	struct twitter_xml_user *us = NULL;
+	struct twitter_xml_user *ut = NULL;
 
 	if (!type || !source || source->type != json_object
 	    || !target || target->type != json_object) {
@@ -998,14 +1160,46 @@ static gboolean twitter_stream_handle_event(struct im_connection *ic, json_value
 	}
 
 	if (strcmp(type, "follow") == 0) {
-		struct twitter_xml_user *us = twitter_xt_get_user(source);
-		struct twitter_xml_user *ut = twitter_xt_get_user(target);
+		us = twitter_xt_get_user(source);
+		ut = twitter_xt_get_user(target);
 		if (g_strcasecmp(us->screen_name, td->user) == 0) {
 			twitter_add_buddy(ic, ut->screen_name, ut->name);
 		}
-		txu_free(us);
-		txu_free(ut);
+	} else if (strcmp(type, "mute") == 0) {
+		GSList *found;
+		char *uid_str;
+		ut = twitter_xt_get_user(target);
+		uid_str = g_strdup_printf("%" PRIu64, ut->uid);
+		if (!(found = g_slist_find_custom(td->mutes_ids, uid_str,
+		                                  (GCompareFunc)strcmp))) {
+			td->mutes_ids = g_slist_prepend(td->mutes_ids, uid_str);
+		}
+		twitter_log(ic, "Muted user %s", ut->screen_name);
+		if (getenv("BITLBEE_DEBUG")) {
+			fprintf(stderr, "New mute: %s %"PRIu64"\n",
+			        ut->screen_name, ut->uid);
+		}
+	} else if (strcmp(type, "unmute") == 0) {
+		GSList *found;
+		char *uid_str;
+		ut = twitter_xt_get_user(target);
+		uid_str = g_strdup_printf("%" PRIu64, ut->uid);
+		if ((found = g_slist_find_custom(td->mutes_ids, uid_str,
+		                                (GCompareFunc)strcmp))) {
+			char *found_str = found->data;
+			td->mutes_ids = g_slist_delete_link(td->mutes_ids, found);
+			g_free(found_str);
+		}
+		g_free(uid_str);
+		twitter_log(ic, "Unmuted user %s", ut->screen_name);
+		if (getenv("BITLBEE_DEBUG")) {
+			fprintf(stderr, "New unmute: %s %"PRIu64"\n",
+			        ut->screen_name, ut->uid);
+		}
 	}
+
+	txu_free(us);
+	txu_free(ut);
 
 	return TRUE;
 }
@@ -1303,18 +1497,20 @@ static void twitter_get_home_timeline(struct im_connection *ic, gint64 next_curs
 	td->home_timeline_obj = NULL;
 	td->flags &= ~TWITTER_GOT_TIMELINE;
 
-	char *args[6];
+	char *args[8];
 	args[0] = "cursor";
 	args[1] = g_strdup_printf("%" G_GINT64_FORMAT, next_cursor);
 	args[2] = "include_entities";
 	args[3] = "true";
+	args[4] = "tweet_mode";
+	args[5] = "extended";
 	if (td->timeline_id) {
-		args[4] = "since_id";
-		args[5] = g_strdup_printf("%" G_GUINT64_FORMAT, td->timeline_id);
+		args[6] = "since_id";
+		args[7] = g_strdup_printf("%" G_GUINT64_FORMAT, td->timeline_id);
 	}
 
 	if (twitter_http(ic, TWITTER_HOME_TIMELINE_URL, twitter_http_get_home_timeline, ic, 0, args,
-	                 td->timeline_id ? 6 : 4) == NULL) {
+	                 td->timeline_id ? 8 : 6) == NULL) {
 		if (++td->http_fails >= 5) {
 			imcb_error(ic, "Could not retrieve %s: %s",
 			           TWITTER_HOME_TIMELINE_URL, "connection failed");
@@ -1325,7 +1521,7 @@ static void twitter_get_home_timeline(struct im_connection *ic, gint64 next_curs
 
 	g_free(args[1]);
 	if (td->timeline_id) {
-		g_free(args[5]);
+		g_free(args[7]);
 	}
 }
 
@@ -1340,7 +1536,7 @@ static void twitter_get_mentions(struct im_connection *ic, gint64 next_cursor)
 	td->mentions_obj = NULL;
 	td->flags &= ~TWITTER_GOT_MENTIONS;
 
-	char *args[6];
+	char *args[8];
 	args[0] = "cursor";
 	args[1] = g_strdup_printf("%" G_GINT64_FORMAT, next_cursor);
 	args[2] = "include_entities";
@@ -1352,9 +1548,11 @@ static void twitter_get_mentions(struct im_connection *ic, gint64 next_cursor)
 		args[4] = "count";
 		args[5] = g_strdup_printf("%d", set_getint(&ic->acc->set, "show_old_mentions"));
 	}
+	args[6] = "tweet_mode";
+	args[7] = "extended";
 
 	if (twitter_http(ic, TWITTER_MENTIONS_URL, twitter_http_get_mentions,
-	                 ic, 0, args, 6) == NULL) {
+	                 ic, 0, args, 8) == NULL) {
 		if (++td->http_fails >= 5) {
 			imcb_error(ic, "Could not retrieve %s: %s",
 			           TWITTER_MENTIONS_URL, "connection failed");
@@ -1384,13 +1582,14 @@ static void twitter_http_get_home_timeline(struct http_request *req)
 
 	td = ic->proto_data;
 
-	txl = g_new0(struct twitter_xml_list, 1);
-	txl->list = NULL;
-
 	// The root <statuses> node should hold the list of statuses <status>
 	if (!(parsed = twitter_parse_response(ic, req))) {
 		goto end;
 	}
+
+	txl = g_new0(struct twitter_xml_list, 1);
+	txl->list = NULL;
+
 	twitter_xt_get_status_list(ic, parsed, txl);
 	json_value_free(parsed);
 
@@ -1423,13 +1622,14 @@ static void twitter_http_get_mentions(struct http_request *req)
 
 	td = ic->proto_data;
 
-	txl = g_new0(struct twitter_xml_list, 1);
-	txl->list = NULL;
-
 	// The root <statuses> node should hold the list of statuses <status>
 	if (!(parsed = twitter_parse_response(ic, req))) {
 		goto end;
 	}
+
+	txl = g_new0(struct twitter_xml_list, 1);
+	txl->list = NULL;
+
 	twitter_xt_get_status_list(ic, parsed, txl);
 	json_value_free(parsed);
 
@@ -1518,6 +1718,19 @@ void twitter_friendships_create_destroy(struct im_connection *ic, char *who, int
 	args[1] = who;
 	twitter_http(ic, create ? TWITTER_FRIENDSHIPS_CREATE_URL : TWITTER_FRIENDSHIPS_DESTROY_URL,
 	             twitter_http_post, ic, 1, args, 2);
+}
+
+/**
+ * Mute or unmute a user
+ */
+void twitter_mute_create_destroy(struct im_connection *ic, char *who, int create)
+{
+	char *args[2];
+
+	args[0] = "screen_name";
+	args[1] = who;
+	twitter_http(ic, create ? TWITTER_MUTES_CREATE_URL : TWITTER_MUTES_DESTROY_URL,
+		     twitter_http_post, ic, 1, args, 2);
 }
 
 void twitter_status_destroy(struct im_connection *ic, guint64 id)

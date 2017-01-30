@@ -64,14 +64,19 @@ def fix_tree(tag, debug=False, lvl=''):
         print("%s</%s>%r" % (lvl, tag.tag, [tag.tail, normalize(tag.tail)]))
 
     # Actually normalize whitespace
-    tag.text = normalize(tag.text)
+    if 'pre' not in tag.attrib:
+        tag.text = normalize(tag.text)
     tag.tail = normalize(tag.tail)
 
 
 # Main logic
 
 def process_file(filename, parent=None):
-    tree = ET.parse(open(filename)).getroot()
+    try:
+        tree = ET.parse(open(filename)).getroot()
+    except:
+        sys.stderr.write("\nException while processing %s\n" % filename)
+        raise
     fix_tree(tree)
     return parse_tag(tree, parent)
 
